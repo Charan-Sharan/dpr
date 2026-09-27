@@ -105,8 +105,8 @@ def response_error(provider, model, code, body, retry_after=None):
     return ProviderError(redact(f"{provider} / {model}: HTTP {code}. {detail} {hints.get(code, '')}"), retryable, delay)
 
 
-def complete(provider, role, system, payload, max_tokens=4096):
-    model = model_for(provider, role)
+def complete(provider, role, system, payload, max_tokens=4096, model_override=None, usage_callback=None):
+    model = model_override or model_for(provider, role)
     data = {"model": model, "temperature": 0.2, "max_tokens": max_tokens,
             "messages": [{"role": "system", "content": system + " Return one valid JSON object, no markdown fences."},
                          {"role": "user", "content": json.dumps(payload)}],
@@ -130,6 +130,8 @@ def complete(provider, role, system, payload, max_tokens=4096):
         raise response_error(provider, model, code, json.dumps(result))
     try:
         choice = result["choices"][0]
+        if usage_callback:
+            usage_callback(result.get("usage"))
         if choice.get("finish_reason") == "length":
             raise ProviderError(f"{provider} / {model}: Output exceeded the token limit. Request a smaller revision.")
         content = choice["message"]["content"].strip()

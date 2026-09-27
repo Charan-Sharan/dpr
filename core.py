@@ -18,6 +18,7 @@ DB = Path(os.environ.get("DPR_DB", Path(__file__).with_name("workspace.sqlite3")
 LOCK = threading.RLock()
 PROJECT = ContextVar("project", default="default")
 RUN = ContextVar("run", default=None)
+MODEL_CALL = ContextVar("model_call", default=None)
 
 
 def record_kind(kind):
@@ -130,6 +131,8 @@ def events(job_id, role, message, **extra):
 
 
 def llm(role, system, payload):
+    if MODEL_CALL.get():
+        return MODEL_CALL.get()(role, system, payload)
     report = (lambda message: events(RUN.get(), role, message)) if RUN.get() else None
     return providers.llm(role, system, payload, report=report)
 
@@ -196,8 +199,12 @@ WRITING_POLICY = (
 
 
 def request_context():
-    return [{"prompt": job["prompt"], "status": job["status"]}
+    recent = [{"prompt": job["prompt"], "status": job["status"]}
             for job in all_items("job") if job["id"] != RUN.get()][-6:]
+    if MODEL_CALL.get():
+        recent.append({"reasoning_memory": [item for item in all_items("memory")
+                       if item.get("status") not in ("superseded", "resolved")][-30:]})
+    return recent
 
 
 def section_name(value):

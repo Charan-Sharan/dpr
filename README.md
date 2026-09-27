@@ -2,16 +2,37 @@
 
 A local, single-researcher workspace with multiple projects for human-directed, multi-agent paper revisions. It supports both GroqCloud and OpenRouter. Each project has an independent document, sources, requests, activity, and version history.
 
+## DPR scholarship workflow (opt-in)
+
+Restart `python3 server.py`, then select **Enable DPR scholarship** in the project bar. This is a per-project opt-in; existing projects keep the legacy workflow until enabled. The first startup of this version backs up an existing SQLite database before recording schema version 2. Existing documents and histories are retained. Interrupted jobs are marked for explicit continuation, never silently restarted.
+
+Use **Discuss** for bounded multi-agent inquiry, **Revise** for proposed document edits, **Review whole paper** for coverage-tracked review, or **Auto** to classify the instruction. Generated prose—including rephrasing—does not enter the paper until you approve it in **Decisions**. Explicit title changes and section moves remain immediate and undoable. If the model invents a title instead of using the exact title you requested, you will be asked to specify it.
+
+The right panel has **Discussion**, **Decisions**, **Memory**, and **Activity** tabs. Expand it for longer conversations. Pause to edit/recommend the participant panel. You can reply to a turn, inject context, redirect, stop, or request your own turn. Each inquiry round allows up to six contribution turns, three per participant, and 40 total provider attempts (including retries and fallback). Checkpoints preserve disagreements and ask for your next objective. Replies at the limit are saved without silently starting more model calls; use **Continue round** to authorize another bounded round.
+
+Proposals include before/after text, a line diff, participant reviews, an evidence audit, and source passage inspection. **Allow without verified evidence** requires acknowledgement and a rationale, preserves the concern in memory, and is included in the downloadable reasoning audit. This does not certify a claim. Approval is conservative: any saved-document change requires refreshing pending proposals before approval. Approved prerequisites can resume waiting tasks within the remaining call budget.
+
+Reasoning memory records assumptions, alternatives, claims, actions, open questions, and researcher decisions with provenance and correction history. Quotation matches are explicitly not semantic verification. Old memory is marked stale after the document changes. Whole-paper reviews process every section in bounded chunks, checkpoint their coverage, and synthesize findings in batches; partial reviews never appear complete. **Mark reviewed** applies only to the reviewed document version and is not a correctness certification.
+
+Files are stored locally, but relevant source excerpts, paper context, and reasoning are sent to configured Groq/OpenRouter providers during model requests. No live calls happen during migration or recovery. Tests use mocked providers. This is a local prototype; live-provider quality and researcher learning benefits have not been evaluated. The legacy behavior below applies when the opt-in is disabled.
+
+The reasoning workflow is an independent adaptation of [Multi-Agent-Reasoning](https://github.com/Skanda-P-R/Multi-Agent-Reasoning/tree/3bf193915b3a557637b7c8e6867e1c9a369bbd0e), not an imported engine or an API-compatible fork. `scholarship.py` handles durable sessions, participant scheduling, memory, and approval; `core.py` handles document validation and versioned commits; `providers.py` handles model requests; `server.py` serves the project-scoped API and static UI. Run one server process per database, on loopback only.
+
 ## Start
 
 Python 3.10+; no Python packages required. PDF extraction additionally needs `pdftotext` (Poppler).
 
 ```bash
-cd dpr-workspace
-python3 server.py
+git clone https://github.com/Charan-Sharan/dpr.git
+cd dpr
+cp .env.example .env
 ```
 
-Put real keys in the local `.env` file using `.env.example` as a reference, then start the server. `GROQ_API_KEY` and `OPEN_ROUTER_API_KEY` are supported; `OPENROUTER_API_KEY` is also accepted. Either provider can be used alone. `your_actual_key_here` is only a placeholder and will be rejected. `.env` is loaded automatically at startup, and existing process environment variables take precedence. Restart the server after configuration changes. Never paste keys into the web page or commit them.
+Copy `.env.example` to `.env`, replace the placeholder API keys, then start the server. `GROQ_API_KEY` and `OPEN_ROUTER_API_KEY` are supported; `OPENROUTER_API_KEY` is also accepted. Either provider can be used alone. `your_actual_key_here` is only a placeholder and will be rejected. `.env` is loaded automatically at startup, and existing process environment variables take precedence. Restart the server after configuration changes. Never paste keys into the web page or commit them. `.env`, local databases, and virtual environments are excluded from Git.
+
+```bash
+python3 server.py
+```
 
 Open `http://127.0.0.1:8765`. Start with **Edit Markdown** to paste or write a draft, or describe the document you want in the request box. Add text/PDF sources to support scientific claims. Data and versions are stored locally in `workspace.sqlite3`. Set `DPR_DB` for a different database path.
 
@@ -37,8 +58,6 @@ With `DPR_PROVIDER=auto` (the default), planning/writing/evidence prefer Groq; s
 
 Set `DPR_PROVIDER=groq` or `openrouter` to change the preferred provider globally, or `DPR_PROVIDER_WRITER` (and the other uppercase role names) per role. Override model IDs with `DPR_GROQ_MODEL_PLANNER`, `DPR_OPENROUTER_MODEL_WRITER`, etc. Legacy `DPR_MODEL_*` settings remain Groq-only. The UI's “key configured” indicator checks presence, not authentication or credits.
 
-The previous Groq planner/evidence default, `llama-3.3-70b-versatile`, was unavailable in the authenticated model list during diagnosis and returned HTTP 404. The old implementation also hid all provider details behind a generic HTTP error and did not load `.env`. Earlier stored 403 errors cannot be diagnosed more precisely retrospectively. Provider error formats follow the [Groq error documentation](https://console.groq.com/docs/errors) and OpenRouter's [structured-output API](https://openrouter.ai/docs/guides/features/structured-outputs).
-
 Run `python3 check_providers.py` to send a tiny JSON completion to each configured provider. `--models` lists available Groq models and relevant OpenRouter models. `--workflow` additionally runs a small live writing job in a temporary database without changing your documents. Live checks use provider quota/credits and never print keys.
 
 ## Writing workflow
@@ -57,7 +76,7 @@ The central view renders the latest saved document. It updates after a committed
 
 The local Markdown renderer supports headings, simple emphasis, links, fenced code, flat lists, blockquotes, and tables. Raw HTML is rendered as text and unsafe link schemes are disabled. It is a lightweight subset, not a complete CommonMark/GFM implementation: nested lists, images, footnotes, math, and complex nested inline formatting are not supported yet.
 
-Request summaries distinguish saved changes from inquiry-only responses and tasks needing attention. Earlier request errors and findings are grouped under expandable history so an old provider failure is not confused with the latest request. Editing rationales are not treated as scholarly assertions by the evidence auditor.
+Request summaries distinguish saved changes from inquiry-only responses and tasks needing attention. Earlier request errors and findings remain with their requests below newer activity, so an old provider failure is not confused with the latest request. Editing rationales are not treated as scholarly assertions by the evidence auditor.
 
 Agent activity is grouped by request, with newest requests first and each request's steps shown chronologically from top to bottom. Entries include dates and times. Updating an older request (for example, allowing a revision) keeps it in its original position, with the new event inside that request.
 
@@ -77,7 +96,7 @@ Review objections are sent back to the writer for one revision attempt, followed
 
 ## DPR principles
 
-The scholar directs the inquiry and owns the conclusions. The shared document is the persistent artifact of that inquiry. Reviewers challenge claims and interpretations; agreement among models is not proof. Uploaded sources support traceable evidence checks. Uncontested, reviewed changes requested by the human are committed automatically and can be undone; disputed proposals require a human decision. Diverse perspectives can strengthen scrutiny, but models may share errors and role labels do not guarantee independent reasoning.
+The scholar directs the inquiry and owns the conclusions. The shared document is the persistent artifact of that inquiry. Reviewers challenge claims and interpretations; agreement among models is not proof. Uploaded sources support traceable evidence checks. In the opt-in scholarship workflow, generated prose requires explicit approval. In the legacy workflow, uncontested, reviewed changes requested by the human can commit automatically; disputed proposals require a human decision. Changes can be undone. Diverse perspectives can strengthen scrutiny, but models may share errors and role labels do not guarantee independent reasoning.
 
 ## Current limits
 
@@ -86,7 +105,6 @@ This is a local prototype, not a production scholarly verification system. Exact
 ## Tests
 
 ```bash
-cd dpr-workspace
 python3 -m unittest discover -s tests -v
 ```
 

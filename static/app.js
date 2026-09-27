@@ -21,20 +21,30 @@ async function api(path, body, project=projectId){const r=await fetch(path+'?pro
 function clear(n){n.replaceChildren();}
 function byTime(items){return [...items].sort((a,b)=>(a.at||0)-(b.at||0));}
 function activityStamp(at){return at?new Date(at*1000).toLocaleString():'';}
+function decisionSection(title,text,kind,markdown=false){
+ const section=el('section','decision-section decision-'+kind),heading=el('h3','decision-label',title),body=el('div','decision-body');
+ if(markdown)body.append(renderMarkdown(String(text||'')));else body.textContent=String(text||'');
+ section.append(heading,body);return section;
+}
 function renderTaskDecision(job,task,group){
  if(!['disputed','evidence_required','waiting','blocked','needs_input','inquiry'].includes(task.status))return;
  const card=el('div','card '+(task.status==='disputed'?'warning':''));
- card.append(el('strong','',task.status.replaceAll('_',' ').toUpperCase()+' · '+task.instruction),el('p','',task.reason||task.finding?.finding||''));
- if(task.proposal){card.append(el('p','','Proposed text: '+task.proposal.text));if(task.review)card.append(el('p','','Review: '+task.review.rationale));}
- if(task.status==='evidence_required')card.append(el('p','','Allow saves this proposed text without verified evidence.'));
+ card.append(el('strong','',task.status.replaceAll('_',' ').toUpperCase()+' · '+task.instruction));
+ const reason=task.reason||task.finding?.finding;
+ if(reason)card.append(decisionSection(task.status==='evidence_required'?'Evidence concerns':task.status==='inquiry'?'Finding':'Review concerns',reason,task.status==='evidence_required'?'concerns':'review'));
+ if(task.proposal){card.append(decisionSection('Proposed text',task.proposal.text,'proposed'));if(task.review)card.append(decisionSection('Review',task.review.rationale,'review'));}
+ if(task.audit)card.append(decisionSection('Evidence audit',task.audit.rationale,'audit'));
+ const actions=el('div','decision-actions');
+ if(task.status==='evidence_required')actions.append(el('p','decision-note','Allow saves this proposed text without verified evidence.'));
  if(['disputed','evidence_required'].includes(task.status)&&task.proposal){
    for(const choice of [task.status==='evidence_required'?'allow':'approve','reject']){
      const button=el('button','',choice==='allow'?'Allow':choice==='approve'?'Approve revision':'Reject');
      button.disabled=['queued','running'].includes(job.status);
      button.onclick=async()=>{button.disabled=true;try{await api('/api/decide',{job_id:job.id,task_id:task.id,choice});await refresh()}catch(error){notice(error);button.disabled=false}};
-     card.append(button);
+     actions.append(button);
    }
  }
+ if(actions.children.length)card.append(actions);
  group.append(card);
 }
 function renderActivity(jobs,activity,target){
@@ -83,16 +93,29 @@ function render(){if(!state)return;const p=state.paper;$('#version').textContent
    open.title='View '+s.title;open.onclick=async()=>{try{const item=await api('/api/source/'+s.id);$('#versionDetail').textContent=item.title+'\n\n'+item.text;$('#versionDialog').showModal()}catch(e){notice(e)}};
    reference.type='button';reference.setAttribute('aria-label','Add '+s.title+' to prompt');reference.onclick=()=>addSourceReference(s);
    n.append(open,reference);sources.append(n)});
- renderActivity(state.jobs,state.events,events);
+ renderActivity(state.jobs.filter(j=>j.schema!==2),state.events,events);
+ if(typeof renderScholarship==='function')renderScholarship();
  [...state.versions].sort((a,b)=>b.number-a.number).slice(0,20).forEach(v=>{const n=el('div','version-item','v'+v.number+' · '+v.prompt);n.onclick=async()=>{try{const item=await api('/api/version/'+v.id);$('#versionDetail').textContent='Version '+v.number+'\n'+item.title+'\n\n'+item.sections.map(s=>s.heading+'\n'+s.blocks.map(b=>b.text).join('\n')).join('\n\n');$('#versionDialog').showModal()}catch(e){notice(e)}};versions.append(n)});
  const active=state.jobs.some(j=>['queued','running'].includes(j.status));$('#run').disabled=active||busy;$('#run').textContent=active?'Reviewing your request…':'Send request ↗';}
 function notice(e){$('#notice').textContent=e.message||String(e);setTimeout(()=>$('#notice').textContent='',8500)}
 let refreshing=false;
 async function refresh(){if(refreshing)return;refreshing=true;const requestedProject=projectId;try{const next=await api('/api/state',undefined,requestedProject);if(requestedProject===projectId){state=next;render()}}catch(e){if(requestedProject===projectId){notice(e);if(e.message==='Unknown project'){projectId='default';history.replaceState(null,'','?project=default');}}}finally{refreshing=false;if(requestedProject!==projectId)refresh()}}
-$('#run').onclick=async()=>{if(busy)return;try{const prompt=$('#prompt').value.trim();if(!prompt)return;busy=true;$('#run').disabled=true;await api('/api/run',{prompt,selection,source_ids:referencedSourceIds(prompt)});$('#prompt').value='';sourceReferences.delete(projectId);setSelection(null);await refresh()}catch(e){notice(e)}finally{busy=false;if(state)render()}};
+$('#run').onclick=async()=>{if(busy)return;try{const prompt=$('#prompt').value.trim();if(!prompt)return;busy=true;$('#run').disabled=true;await api('/api/run',{prompt,selection,source_ids:referencedSourceIds(prompt),mode:$('#requestMode')?.value||'auto'});$('#prompt').value='';sourceReferences.delete(projectId);setSelection(null);await refresh()}catch(e){notice(e)}finally{busy=false;if(state)render()}};
 $('#undo').onclick=async()=>{try{await api('/api/undo',{});refresh()}catch(e){notice(e)}};
 $('#editTitle').onclick=async()=>{const title=window.prompt('Paper title',state.paper.title);if(title?.trim())try{await api('/api/title',{title});refresh()}catch(e){notice(e)}};
 $('#addSource').onclick=()=>$('#sourceDialog').showModal();$('#cancelSource').onclick=()=>$('#sourceDialog').close();$('#closeVersion').onclick=()=>$('#versionDialog').close();
+let sourceTitleEdited=false;
+function titleFromFilename(filename){
+ return filename.replace(/\.(pdf|txt|md)$/i,'').replace(/[_-]+/g,' ').replace(/\s+/g,' ').trim().slice(0,200);
+}
+$('#sourceTitle').addEventListener('input',()=>{sourceTitleEdited=!!$('#sourceTitle').value.trim();});
+$('#sourceFile').addEventListener('change',()=>{
+ const file=$('#sourceFile').files[0],title=$('#sourceTitle');
+ if(!file||sourceTitleEdited&&title.value.trim())return;
+ title.value=titleFromFilename(file.name);
+ $('#sourceTitleHint').textContent='Suggested from the filename. You can edit it before saving.';
+});
+$('#sourceForm').addEventListener('reset',()=>{sourceTitleEdited=false;$('#sourceTitleHint').textContent='Selecting a file suggests a title instantly, without an AI call.';});
 $('#sourceForm').onsubmit=async e=>{e.preventDefault();try{const title=$('#sourceTitle').value.trim(),file=$('#sourceFile').files[0];if(file?.name.toLowerCase().endsWith('.pdf')){const b64=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=reject;reader.readAsDataURL(file)});await api('/api/evidence/pdf',{title,base64:b64})}else{const text=$('#sourceText').value||await file?.text();await api('/api/evidence',{title,text})}$('#sourceForm').reset();$('#sourceDialog').close();refresh()}catch(err){notice(err)}};
 function setSelection(value){selection=value;$('#selectionContext').hidden=!value;$('#selectionText').textContent=value?'Selected: “'+value.text+'”':'';}
 $('#clearSelection').onclick=()=>setSelection(null);

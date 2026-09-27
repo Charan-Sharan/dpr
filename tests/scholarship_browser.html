@@ -1,0 +1,58 @@
+<!doctype html><html><body><pre id="result">RUNNING</pre><iframe src="/" style="width:1200px;height:750px"></iframe><script>
+const result=document.querySelector('#result');
+const check=(ok,text)=>{if(!ok)throw Error(text)};
+const pause=()=>new Promise(resolve=>setTimeout(resolve,80));
+async function until(fn){for(let i=0;i<120;i++){if(await fn())return;await pause()}throw Error('Timed out')}
+document.querySelector('iframe').onload=async()=>{try{
+ const w=document.querySelector('iframe').contentWindow,d=w.document;
+ await until(()=>d.querySelector('#paper h1'));
+ const enabled=d.querySelector('#scholarshipEnabled');enabled.checked=true;await enabled.onchange({target:enabled});
+ check(!d.querySelector('#scholarshipPanel').hidden,'Scholarship panel hidden');
+ d.querySelector('#requestMode').value='revise';d.querySelector('#prompt').value='Revise introduction';
+ await d.querySelector('#run').onclick();
+ await until(async()=>{await w.refresh();return d.querySelector('#scholarshipContent').textContent.includes('awaiting approval')});
+ check(d.querySelector('#paper').textContent.includes('Original prose.'),'Proposal saved automatically');
+ d.querySelector('[data-tab=decisions]').click();
+ check(d.querySelector('#scholarshipContent').textContent.includes('Line-by-line diff'),'Diff missing');
+ const proposed=d.querySelector('.decision-proposed'),review=d.querySelector('.decision-review');
+ check(proposed.querySelector('.decision-label').textContent==='Proposed text — not saved','DPR proposal heading missing');
+ check(review.querySelector('.decision-label').textContent==='Review','DPR review heading missing');
+ check(d.querySelector('.decision-audit .decision-label').textContent==='Evidence audit','DPR evidence heading missing');
+ check(review.getBoundingClientRect().top>proposed.getBoundingClientRect().bottom,'DPR review overlaps proposed text');
+ const approve=Array.from(d.querySelectorAll('#scholarshipContent button')).find(b=>b.textContent==='Approve revision');
+ check(approve,'Approval control missing');await approve.onclick();
+ await until(async()=>{await w.refresh();return d.querySelector('#paper').textContent.includes('Proposed scope.')});
+ d.querySelector('#prompt').value='Revise introduction again';await d.querySelector('#run').onclick();
+ await until(async()=>{await w.refresh();return !!Array.from(d.querySelectorAll('.decision-actions button')).find(b=>b.textContent==='Reject'&&!b.disabled)});
+ const beforeReject=(await w.api('/api/state')).paper.id;
+ await Array.from(d.querySelectorAll('.decision-actions button')).find(b=>b.textContent==='Reject'&&!b.disabled).onclick();
+ check((await w.api('/api/state')).paper.id===beforeReject,'Reject changed the saved paper');
+ d.querySelector('[data-tab=discussion]').click();
+ check(d.querySelector('#scholarshipContent').textContent.includes('no further action required'),'Approved request still appears to need input');
+ check(d.querySelector('#scholarshipContent').textContent.includes('1/1 editing tasks resolved'),'Editing progress missing');
+ check(!d.querySelector('#scholarshipContent').textContent.includes('0/6 contributions'),'Editing request shows misleading discussion counter');
+ d.querySelector('#requestMode').value='discuss';d.querySelector('#prompt').value='What are we failing to see?';await d.querySelector('#run').onclick();
+ await until(async()=>{await w.refresh();return d.querySelectorAll('.contribution').length===6&&d.querySelector('.checkpoint')});
+ check(d.querySelector('#paper').textContent.includes('Proposed scope.'),'Inquiry changed document');
+ check(d.querySelector('#scholarshipContent').textContent.includes('Researcher checkpoint'),'Checkpoint missing');
+ const discussion=d.querySelector('#scholarshipContent').firstChild;
+ check(discussion.textContent.includes('What are we failing to see?'),'Latest request not first');
+ const nodes=d.querySelector('.contribution');await w.refresh();check(nodes===d.querySelector('.contribution'),'Polling rebuilt unchanged conversation');
+ d.querySelector('[data-tab=memory]').click();check(d.querySelector('#scholarshipContent').textContent.includes('Unverified assumption'),'Memory missing');
+ d.querySelector('[data-tab=activity]').click();check(d.querySelector('#scholarshipContent').textContent.includes('Calling'),'Provider details missing');
+ const sessions=await w.api('/api/sessions');const job=sessions.sessions.at(-1);
+ const events=await w.api('/api/sessions/'+job.id+'/events');check(events.length>0,'Event API missing');
+ const audit=await(await w.fetch(d.querySelector('#exportAudit').href)).json();check(audit.document_version,'Audit export missing');
+ d.querySelector('#expandDiscussion').click();check(d.body.classList.contains('discussion-wide'),'Panel did not expand');
+ w.frameElement.style.width='390px';await pause();
+ check(d.querySelector('.composer').getBoundingClientRect().width<390,'Composer overflow at mobile width');
+ check(d.querySelector('#scholarshipPanel').getBoundingClientRect().width<390,'Discussion overflow at mobile width');
+ const layout=d.createElement('div');layout.style.width='240px';d.querySelector('.activity').append(layout);
+ w.renderProposal({id:'fixture',status:'awaiting_approval'},{id:'fixture-task',instruction:'Long revision',status:'evidence_required',reason:'Missing evidence.',proposal:{text:'Long **proposed text**. '.repeat(50)+'x'.repeat(180),claims:[]},review:{rationale:'Review explanation. '.repeat(30)},audit:{rationale:'Evidence not verified.'}},layout);
+ check(layout.querySelectorAll('.decision-section').length===4,'DPR sections are not individually labeled');
+ check(layout.querySelector('.decision-actions .decision-note'),'DPR Allow explanation missing');
+ check(layout.scrollWidth<=layout.clientWidth+1,'Long DPR proposal overflows narrow panel');
+ layout.remove();
+ result.textContent='PASS: opted-in approvals, inquiry, memory, activity, diff, audit and responsive discussion';
+}catch(error){result.textContent='FAIL: '+error.message}};
+</script></body></html>

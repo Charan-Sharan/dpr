@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import core
+import scholarship
 
 ROOT = Path(__file__).parent
 
@@ -45,10 +46,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(core.all_items("project"))
             if path == "/api/state":
                 return self.send({"project": core.get("project", core.PROJECT.get()), "projects": core.all_items("project"),
+                                  "scholarship": scholarship.snapshot(),
                                   "providers": core.providers.status(),
                                   "paper": core.paper(), "sources": [{"id": e["id"], "title": e["title"]} for e in core.all_items("evidence")],
                                   "jobs": core.all_items("job"), "events": core.all_items("event"),
                                   "versions": [{"id": v["id"], "number": v["number"], "prompt": v["prompt"], "at": v["at"]} for v in core.all_items("version")]})
+            if path == "/api/sessions":
+                return self.send(scholarship.snapshot())
+            if path == "/api/audit":
+                return self.send(scholarship.audit_export())
+            if path.startswith("/api/sessions/"):
+                parts = path.split("/")
+                session = scholarship.present_session(scholarship.get(parts[3]))
+                if len(parts) == 5 and parts[4] == "events":
+                    after = int(parse_qs(urlparse(self.path).query).get("after", ["0"])[0])
+                    return self.send([e for e in session["activity"] if e["seq"] > after])
+                return self.send(session)
             if path == "/api/latex":
                 return self.send(core.latex(core.paper()).encode(), content_type="text/plain")
             if path == "/api/markdown":
@@ -81,6 +94,29 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/projects":
                 return self.send(core.create_project(data.get("name")), 201)
+            if path == "/api/scholarship":
+                return self.send(scholarship.settings(data.get("enabled")))
+            if path == "/api/memory":
+                return self.send(scholarship.update_memory(data.get("id"), data.get("action"), data.get("text", "")))
+            if path.startswith("/api/sessions/"):
+                parts = path.split("/")
+                session_id = parts[3]
+                if len(parts) != 5:
+                    raise ValueError("Specify a session action")
+                action = parts[4]
+                if action == "decide":
+                    job = scholarship.decide(session_id, data.get("task_id"), data.get("choice"), data.get("rationale", ""))
+                else:
+                    job = scholarship.control(session_id, action, data.get("text", ""), data.get("panel"), data.get("reply_to"))
+                if job["status"] == "queued":
+                    scholarship.launch(job["id"])
+                return self.send(job)
+            if path == "/api/sessions" or (path == "/api/run" and scholarship.enabled()):
+                if not scholarship.enabled():
+                    raise ValueError("Enable DPR scholarship for this project first")
+                job = scholarship.create(data.get("prompt"), data.get("mode", "auto"), data.get("selection"), data.get("source_ids"))
+                scholarship.launch(job["id"])
+                return self.send(job, 202)
             if path == "/api/run":
                 prompt = str(data.get("prompt", "")).strip()
                 if not prompt or len(prompt) > 12000:
@@ -124,6 +160,14 @@ class Handler(BaseHTTPRequestHandler):
                 core.put("evidence", item)
                 return self.send(item, 201)
             if path == "/api/decide":
+                existing = core.get("job", data["job_id"])
+                if existing and existing.get("schema") == scholarship.SCHEMA:
+                    job = scholarship.decide(data["job_id"], data["task_id"], data["choice"], data.get("rationale", ""))
+                    if job["status"] == "queued":
+                        scholarship.launch(job["id"])
+                    return self.send(job)
+                if scholarship.enabled():
+                    raise ValueError("Legacy proposal: request a fresh revision under the new workflow")
                 return self.send(core.decide(data["job_id"], data["task_id"], data["choice"]))
             if path == "/api/undo":
                 return self.send(core.undo())
@@ -147,6 +191,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    scholarship.migrate()
+    scholarship.recover()
     core.paper()
     port = int(os.environ.get("PORT", "8765"))
     print(f"DPR workspace: http://127.0.0.1:{port}")

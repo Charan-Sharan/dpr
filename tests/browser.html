@@ -12,6 +12,19 @@ document.querySelector('iframe').onload = async () => {
   check(d.querySelectorAll('#paper li').length === 2, 'Markdown list missing');
   check(d.querySelector('#paper pre code').textContent.includes('## code heading'), 'Fence parsed as heading');
   check(d.querySelector('#paper table td').textContent === 'world', 'Table missing');
+  const sourceForm=d.querySelector('#sourceForm'),titleField=d.querySelector('#sourceTitle'),fileField=d.querySelector('#sourceFile');
+  const chooseFile=name=>{const transfer=new w.DataTransfer();transfer.items.add(new w.File(['Sample source'],name,{type:'text/plain'}));fileField.files=transfer.files;fileField.dispatchEvent(new w.Event('change'));};
+  chooseFile('Prompt_Engineering-A_Survey.PDF');
+  check(titleField.value==='Prompt Engineering A Survey','Filename title not suggested immediately');
+  chooseFile('Another_Study.md');check(titleField.value==='Another Study','Unedited suggestion did not update for new file');
+  titleField.value='My chosen title';titleField.dispatchEvent(new w.Event('input'));
+  chooseFile('Replacement.txt');check(titleField.value==='My chosen title','File selection overwrote custom title');
+  titleField.value='';titleField.dispatchEvent(new w.Event('input'));chooseFile('研究_Notes.txt');
+  check(titleField.value==='研究 Notes','Clearing title did not allow a new Unicode suggestion');
+  sourceForm.reset();chooseFile('Reset_Title.pdf');check(titleField.value==='Reset Title','Form reset did not reset suggestion state');
+  fileField.value='';fileField.dispatchEvent(new w.Event('change'));check(titleField.value==='Reset Title','Cancelling file selection erased title');
+  check(w.titleFromFilename('a'.repeat(220)+'.pdf').length===200,'Suggested title exceeds server limit');
+  sourceForm.reset();
   const scroll=d.querySelector('.paper-scroll'),composer=d.querySelector('.composer');
   const lastSection=d.querySelector('#paper section:last-child');
   const checkLongPaper=async()=>{
@@ -42,6 +55,18 @@ document.querySelector('iframe').onload = async () => {
   const orderedTimeline=timeline.textContent;
   w.renderActivity([...jobs].reverse(),[...activity].reverse(),timeline);
   check(timeline.textContent===orderedTimeline,'Activity order depends on response array order');
+  const proposalCard=timeline.lastChild.querySelector('.decision-proposed');
+  check(proposalCard.querySelector('.decision-label').textContent==='Proposed text','Legacy proposal heading missing');
+  check(proposalCard.querySelector('.decision-body').textContent==='Unverified claim','Legacy proposed text changed');
+  check(timeline.lastChild.querySelector('.decision-actions .decision-note'),'Allow explanation not grouped with actions');
+  const layout=d.createElement('div');layout.style.width='240px';d.querySelector('.activity').append(layout);
+  w.renderTaskDecision({id:'layout',status:'needs_attention'},{id:'layout-task',status:'evidence_required',instruction:'Expand introduction',reason:'Evidence is missing.',proposal:{text:'Long proposed prose. '.repeat(60)+'x'.repeat(180)},review:{rationale:'Independent review. '.repeat(30)},audit:{rationale:'Check original sources.'}},layout);
+  const sections=layout.querySelectorAll('.decision-section');
+  check(Array.from(sections).map(s=>s.querySelector('.decision-label').textContent).join('|')==='Evidence concerns|Proposed text|Review|Evidence audit','Legacy sections not separated');
+  check(Array.from(sections).every(s=>Number(w.getComputedStyle(s.querySelector('.decision-label')).fontWeight)>=700),'Section headings not prominent');
+  check(layout.scrollWidth<=layout.clientWidth+1,'Long legacy proposal overflows narrow panel');
+  check(sections[2].getBoundingClientRect().top>sections[1].getBoundingClientRect().bottom,'Review has no separation from proposal');
+  layout.remove();
   const node = d.querySelector('.markdown-block p').firstChild;
   const range = d.createRange(); range.setStart(node,0); range.setEnd(node,5);
   w.getSelection().removeAllRanges(); w.getSelection().addRange(range); w.captureSelection();
