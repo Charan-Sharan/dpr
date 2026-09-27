@@ -1,0 +1,124 @@
+<!doctype html><html><body><pre id="result">RUNNING</pre><iframe id="workspace" src="/" style="width:1200px;height:750px"></iframe>
+<script>
+const result = document.querySelector('#result');
+const pause = () => new Promise(resolve => setTimeout(resolve, 80));
+const check = (condition, message) => { if (!condition) throw Error(message); };
+async function until(predicate) { for(let i=0;i<90;i++){if(await predicate())return;await pause();}throw Error('Timed out waiting for UI'); }
+document.querySelector('iframe').onload = async () => {
+ try {
+  const w = document.querySelector('iframe').contentWindow, d = w.document;
+  await until(() => d.querySelector('#paper strong'));
+  check(d.querySelector('#paper strong').textContent === 'careful', 'Markdown emphasis missing');
+  check(d.querySelectorAll('#paper li').length === 2, 'Markdown list missing');
+  check(d.querySelector('#paper pre code').textContent.includes('## code heading'), 'Fence parsed as heading');
+  check(d.querySelector('#paper table td').textContent === 'world', 'Table missing');
+  const scroll=d.querySelector('.paper-scroll'),composer=d.querySelector('.composer');
+  const lastSection=d.querySelector('#paper section:last-child');
+  const checkLongPaper=async()=>{
+    check(scroll.scrollHeight>scroll.clientHeight+100,'Long paper is not scrollable');
+    const before=composer.getBoundingClientRect().top;
+    scroll.scrollTop=scroll.scrollHeight;await pause();
+    check(Math.abs(composer.getBoundingClientRect().top-before)<2,'Prompt moved while scrolling paper');
+    check(lastSection.getBoundingClientRect().bottom<composer.getBoundingClientRect().top-4,'Conclusion is hidden beneath prompt');
+    scroll.scrollTop=0;
+  };
+  await checkLongPaper();
+  w.frameElement.style.width='800px';await pause();await checkLongPaper();
+  w.frameElement.style.width='390px';await pause();await checkLongPaper();
+  w.frameElement.style.width='1200px';await pause();
+  const unsafe = d.createElement('div'); unsafe.append(w.renderMarkdown('<img src=x onerror=alert(1)>\n\n[bad](javascript:alert)'));
+  check(!unsafe.querySelector('img') && !unsafe.querySelector('a[href]'), 'Unsafe Markdown');
+  const timeline=d.createElement('div');
+  const jobs=[{id:'new',at:200,status:'complete',prompt:'New request',tasks:[]},{id:'old',at:100,status:'needs_attention',prompt:'Old request',tasks:[{id:'old-task',status:'evidence_required',instruction:'Review claim',proposal:{text:'Unverified claim'}}]}];
+  const activity=[{id:'finish',job_id:'new',at:203,role:'system',message:'Done'},
+                  {id:'old-review',job_id:'old',at:300,role:'researcher',message:'Later approval of old request'},
+                  {id:'start',job_id:'new',at:201,role:'planner',message:'Start'},
+                  {id:'write',job_id:'new',at:202,role:'writer',message:'Write'}];
+  w.renderActivity(jobs,activity,timeline);
+  check(Array.from(timeline.children).map(n=>n.dataset.jobId).join(',')==='new,old','Requests not newest first');
+  check(Array.from(timeline.firstChild.querySelectorAll('[data-event-id]')).map(n=>n.dataset.eventId).join(',')==='start,write,finish','Steps not chronological');
+  check(timeline.lastChild.querySelector('[data-event-id]').dataset.eventId==='old-review','Old approval escaped its request');
+  check(!timeline.firstChild.querySelector('button') && timeline.lastChild.querySelector('button')?.textContent==='Allow','Old decision appears above latest request');
+  const orderedTimeline=timeline.textContent;
+  w.renderActivity([...jobs].reverse(),[...activity].reverse(),timeline);
+  check(timeline.textContent===orderedTimeline,'Activity order depends on response array order');
+  const node = d.querySelector('.markdown-block p').firstChild;
+  const range = d.createRange(); range.setStart(node,0); range.setEnd(node,5);
+  w.getSelection().removeAllRanges(); w.getSelection().addRange(range); w.captureSelection();
+  check(!d.querySelector('#selectionContext').hidden, 'Selection context missing');
+  const block = d.querySelector('.markdown-block'); await w.refresh();
+  check(block === d.querySelector('.markdown-block'), 'Polling replaced document nodes');
+  check(w.getSelection().toString() === 'Write', 'Polling lost text selection');
+  d.querySelector('#prompt').value = 'Rephrase the selected text'; await d.querySelector('#run').onclick();
+  await until(async () => { await w.refresh(); return d.querySelector('#paper').textContent.includes('Compose'); });
+  check(d.querySelector('#paper strong').textContent === 'careful', 'Selected edit changed surrounding content');
+  d.querySelector('#editMarkdown').click();
+  d.querySelector('#markdownEditor').value = '# Revised document\n\n## Implementation\n\n- New step';
+  d.querySelector('#markdownForm').requestSubmit();
+  await until(() => d.querySelector('#paper h1').textContent === 'Revised document');
+  check(d.querySelector('#paper li').textContent === 'New step', 'Saved draft not rendered');
+  const exported = await (await w.fetch('/api/markdown')).text();
+  check(exported.includes('# Revised document') && exported.includes('- New step'), 'Export is stale');
+  await w.refresh();check(d.querySelector('#paper h1').textContent === 'Revised document','Refresh lost saved draft');
+  const previous = await w.api('/api/state');
+  await w.api('/api/evidence',{title:'First project source',text:'Only for the first project.'});
+  await w.refresh();
+  const sourceRow=d.querySelector('#sources .source-item');
+  const sourceTitle=sourceRow.querySelector('.source-open'),sourceAction=sourceRow.querySelector('.source-reference');
+  sourceTitle.textContent='▣ Prompt Engineer: Analyzing Human-AI Interaction in Academic Research and Documentation';
+  check(sourceTitle.getBoundingClientRect().width>sourceRow.getBoundingClientRect().width-8,'Long filename is squeezed by Add reference');
+  check(sourceAction.getBoundingClientRect().top>=sourceTitle.getBoundingClientRect().bottom-1,'Add reference overlaps filename');
+  w.frameElement.style.width='800px';await pause();
+  check(sourceTitle.getBoundingClientRect().width>sourceRow.getBoundingClientRect().width-8,'Filename is squeezed at tablet width');
+  w.frameElement.style.width='1200px';await pause();
+  d.querySelector('#prompt').value='Update the introduction using this file';
+  d.querySelector('#prompt').setSelectionRange(24,24);
+  d.querySelector('#sources .source-reference').click();
+  check(d.querySelector('#prompt').value.includes('Source: “First project source”'),'Reference not inserted into prompt');
+  check(d.activeElement===d.querySelector('#prompt'),'Prompt did not receive focus');
+  check(d.querySelectorAll('#sources .source-reference').length===1,'Source reference action missing');
+  d.querySelector('#newProject').click();d.querySelector('#projectName').value='Second project';d.querySelector('#projectForm').requestSubmit();
+  await until(() => d.querySelector('#paper h1')?.textContent === 'Second project');
+  const second = await w.api('/api/state');
+  check(second.project.id !== previous.project.id, 'New project reused the original project');
+  check(second.sources.length === 0 && second.jobs.length === 0 && second.versions.length === 1, 'Project data leaked');
+  const oldVersion = await w.fetch('/api/version/'+previous.paper.id+'?project='+second.project.id);
+  check(oldVersion.status === 404, 'Cross-project version lookup succeeded');
+  const secondExport = await (await w.fetch(d.querySelector('#exportMarkdown').href)).text();
+  check(secondExport.includes('# Second project') && !secondExport.includes('New step'), 'Export used wrong project');
+  check(w.location.search.includes(second.project.id), 'Project selection not persisted in URL');
+  d.querySelector('#prompt').value='Lets work on a papper titled can prompt engineering be a career option?';
+  await d.querySelector('#run').onclick();
+  await until(async () => {await w.refresh();return d.querySelector('#paper h1')?.textContent === 'Can prompt engineering be a career option?';});
+  check(!d.querySelector('#paper section'), 'Title request created a section');
+  check(d.querySelector('#events').textContent.includes('1 document change(s) saved.'), 'Title change outcome missing');
+  d.querySelector('#prompt').value='Add an unsupported claim';await d.querySelector('#run').onclick();
+  const allowButton=()=>Array.from(d.querySelectorAll('#events button')).find(button=>button.textContent==='Allow'&&!button.disabled);
+  await until(async()=>{await w.refresh();return !!allowButton();});
+  check(!d.querySelector('#paper').textContent.includes('A statement accepted'), 'Evidence-blocked text was saved automatically');
+  await allowButton().onclick();
+  await until(async()=>{await w.refresh();return d.querySelector('#paper').textContent.includes('A statement accepted by the author.');});
+  check(d.querySelector('#paper').textContent.includes('Allowed by you · evidence not verified'), 'Override not labeled');
+  d.querySelector('#projectSelect').value=previous.project.id;d.querySelector('#projectSelect').dispatchEvent(new Event('change'));
+  await until(() => d.querySelector('#paper h1')?.textContent === 'Revised document');
+  check(d.querySelector('#sources').textContent.includes('First project source'), 'Original sources not restored');
+  check(d.querySelector('#paper li').textContent === 'New step', 'Original draft was changed by project creation');
+  d.querySelector('#editMarkdown').click();
+  d.querySelector('#markdownEditor').value='# Paper\n\n## Introduction\n\nIntro.\n\n## Results\n\nResults.\n\n## Literature Survey\n\nSurvey text.\n\n## References\n\n- Citation';
+  d.querySelector('#markdownForm').requestSubmit();
+  await until(()=>d.querySelector('#paper h1')?.textContent==='Paper');
+  d.querySelector('#prompt').value='Move the literature Surevy from bottom to after Introduction';
+  await d.querySelector('#run').onclick();
+  await until(async()=>{await w.refresh();return Array.from(d.querySelectorAll('#paper section h2')).map(h=>h.textContent).join(',')==='Introduction,Literature Survey,Results,References';});
+  check(d.querySelector('#paper').textContent.includes('Survey text.'),'Move lost section content');
+  check(!d.querySelector('#events .activity-run .activity-event strong')?.textContent.includes('writer'),'Move unexpectedly used writer');
+  d.querySelector('#sources .source-reference').click();
+  d.querySelector('#prompt').value+=' Add an unsupported claim';
+  await d.querySelector('#run').onclick();
+  const sourceId=(await w.api('/api/state')).sources[0].id;
+  await until(async()=>{const latest=(await w.api('/api/state')).jobs.at(-1);return latest?.status==='needs_attention';});
+  check((await w.api('/api/state')).jobs.at(-1).source_ids.includes(sourceId),'Selected source ID not sent with request');
+  result.textContent = 'PASS: Markdown, safe rendering, stable polling, selected revision, draft saving, latest export, project creation/switching/isolation';
+ } catch(error) { result.textContent = 'FAIL: ' + error.message; }
+};
+</script></body></html>
