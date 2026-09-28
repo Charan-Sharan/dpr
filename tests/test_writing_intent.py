@@ -98,24 +98,48 @@ class WritingIntentTests(unittest.TestCase):
         self.assertEqual(core.paper(), self.before)
         self.assertEqual(core.get("job", job["id"])["summary"], "Inquiry answered; document unchanged.")
 
-    def test_fabricated_result_remains_blocked_without_sources(self):
-        job = self.job("Draft an abstract")
+    def test_source_free_draft_saves_without_a_source_review_call(self):
+        job = self.job("Draft a general introduction")
+        calls = []
         def model(role, system, payload):
+            calls.append(role)
             if role == "planner":
-                return {"tasks": [{"operation": "revise_section", "section_id": None, "heading": "Abstract", "instruction": "Draft abstract"}]}
+                return {"tasks": [{"operation": "revise_section", "section_id": None, "heading": "Introduction", "instruction": "Draft introduction"}]}
             if role == "writer":
-                return {"section_id": payload["section"]["id"], "operation": "append", "claims": [], "text": "Our survey found that 90% of employers hire prompt engineers."}
-            if role == "evidence":
-                return {"unsupported_claims": ["No survey data supports the 90% figure."], "objections": []}
+                return {"section_id": payload["section"]["id"], "operation": "append", "claims": [{"text": "General background", "citations": []}], "text": "General background for the topic."}
             return {"objections": []}
         with patch.object(core, "llm", side_effect=model):
             core.run_job(job["id"])
-        self.assertEqual(core.paper(), self.before)
         result = core.get("job", job["id"])
-        self.assertEqual(result["status"], "needs_attention")
-        self.assertEqual(result["tasks"][0]["status"], "evidence_required")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["tasks"][0]["status"], "committed")
+        self.assertNotIn("evidence", calls)
+        self.assertIn("General background", core.markdown(core.paper()))
+        self.assertNotIn("evidence_override", core.paper()["sections"][0]["blocks"][0])
 
-    def test_writer_repairs_review_objection_and_revision_is_audited_again(self):
+    def test_optional_source_review_warning_failure_or_invalid_response_does_not_block(self):
+        core.put("evidence", {"id": "source", "title": "Notes", "text": "Some topic notes."})
+        for assessment in ({"unsupported_claims": ["No matching quote"], "objections": ["Source disagrees"]}, {"invalid": True}, RuntimeError("Source reviewer unavailable")):
+            with self.subTest(assessment=assessment):
+                job = self.job("Draft introduction")
+                def model(role, system, payload):
+                    if role == "planner":
+                        return {"tasks": [{"operation": "revise_section", "section_id": None, "heading": "Introduction", "instruction": "Draft introduction"}]}
+                    if role == "writer":
+                        return {"section_id": payload["section"]["id"], "operation": "append", "text": "A proposed interpretation.", "claims": [{"text": "Interpretation", "citations": []}]}
+                    if role == "evidence":
+                        if isinstance(assessment, Exception):
+                            raise assessment
+                        return assessment
+                    return {"objections": []}
+                with patch.object(core, "llm", side_effect=model):
+                    core.run_job(job["id"])
+                result = core.get("job", job["id"])
+                self.assertEqual(result["status"], "complete")
+                self.assertEqual(result["tasks"][0]["status"], "committed")
+                self.assertTrue(result["tasks"][0]["audit"]["advisory"])
+
+    def test_writer_repairs_normal_review_objections(self):
         job = self.job("Draft an abstract about prompt engineering careers")
         writes, audits = [], []
         def model(role, system, payload):
@@ -124,17 +148,17 @@ class WritingIntentTests(unittest.TestCase):
             if role == "writer":
                 writes.append(payload)
                 if len(writes) == 2:
-                    self.assertEqual(payload["review_feedback"]["audit"]["unsupported_claims"], ["Unsupported claim about growth"])
+                    self.assertEqual(payload["review_feedback"]["review"]["objections"], ["Clarify the scope"])
                 text = "The field is rapidly growing." if len(writes) == 1 else "This paper will examine possible career paths and the evidence needed to evaluate them."
                 return {"section_id": payload["section"]["id"], "operation": "append", "text": text, "claims": []}
             if role == "evidence":
                 audits.append(payload)
                 return {"unsupported_claims": ["Unsupported claim about growth"] if len(audits) == 1 else [], "objections": []}
-            return {"objections": []}
+            return {"objections": ["Clarify the scope"] if len(writes) == 1 else []}
         with patch.object(core, "llm", side_effect=model):
             core.run_job(job["id"])
         self.assertEqual(len(writes), 2)
-        self.assertEqual(len(audits), 2)
+        self.assertEqual(len(audits), 0)
         self.assertNotIn("rapidly growing", core.markdown(core.paper()))
         self.assertIn("will examine", core.markdown(core.paper()))
         self.assertEqual(core.get("job", job["id"])["status"], "complete")
@@ -196,9 +220,10 @@ class WritingIntentTests(unittest.TestCase):
         section = {"id": "section", "heading": "Literature Survey", "blocks": []}
         proposal = {"section_id": "section", "operation": "append", "text": "A final observation is reported.",
                     "claims": [{"text": "Final observation", "citations": [{"source_id": "large", "quote": "The survey reports a final observation."}]}]}
-        self.assertIsNone(core.validate_proposal(proposal, section, [source]))
+        self.assertIsNone(core.validate_proposal(proposal, section))
+        self.assertIsNone(core.citation_issue(proposal, [source]))
 
-    def evidence_task(self):
+    def old_evidence_task(self):
         section = {"id": "new-section", "heading": "Abstract", "blocks": []}
         task = {"id": "task", "status": "evidence_required", "instruction": "Add abstract", "section_id": section["id"],
                 "new_section": True, "heading": section["heading"], "base_section": None, "reason": "No supporting source",
@@ -209,37 +234,41 @@ class WritingIntentTests(unittest.TestCase):
         core.put("job", job)
         return job, task
 
-    def test_allow_evidence_override_saves_version_audit_and_can_undo(self):
-        job, task = self.evidence_task()
-        result = core.decide(job["id"], task["id"], "allow")
+    def test_old_evidence_hold_uses_normal_approval_without_override_and_can_undo(self):
+        job, task = self.old_evidence_task()
+        result = core.decide(job["id"], task["id"], "approve")
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["tasks"][0]["status"], "committed")
         block = core.paper()["sections"][0]["blocks"][0]
         self.assertEqual(block["text"], task["proposal"]["text"])
-        self.assertEqual(block["evidence_override"]["reason"], "No supporting source")
-        self.assertEqual(block["evidence_override"], result["tasks"][0]["evidence_override"])
+        self.assertNotIn("evidence_override", block)
+        self.assertEqual(result["tasks"][0]["retired_evidence_check"]["reason"], "No supporting source")
         self.assertEqual(core.all_items("event")[-1]["role"], "researcher")
         with self.assertRaisesRegex(ValueError, "not awaiting"):
-            core.decide(job["id"], task["id"], "allow")
+            core.decide(job["id"], task["id"], "approve")
         core.undo()
         self.assertEqual(core.paper()["sections"], [])
 
-    def test_allow_does_not_bypass_invalid_operation_or_stale_section(self):
+    def test_normal_approval_does_not_bypass_invalid_operation_or_stale_section(self):
         for stale in (False, True):
-            job, task = self.evidence_task()
+            job, task = self.old_evidence_task()
             if stale:
                 task["base_section"] = {"id": "old-section"}
             else:
                 task["proposal"]["operation"] = "delete_document"
             core.put("job", job)
             with self.assertRaises(ValueError):
-                core.decide(job["id"], task["id"], "allow")
+                core.decide(job["id"], task["id"], "approve")
             self.assertEqual(core.paper(), self.before)
 
-    def test_evidence_revision_can_be_rejected_but_not_implicitly_approved(self):
-        job, task = self.evidence_task()
-        with self.assertRaises(ValueError):
-            core.decide(job["id"], task["id"], "approve")
+    def test_old_source_hold_is_presented_for_a_normal_decision_without_auto_saving(self):
+        job, task = self.old_evidence_task()
+        presented = core.present_job(job)
+        self.assertEqual(presented["tasks"][0]["status"], "disputed")
+        self.assertEqual(core.get("job", job["id"])["tasks"][0]["status"], "evidence_required")
+        self.assertEqual(core.paper(), self.before)
+        with self.assertRaisesRegex(ValueError, "Choose approve or reject"):
+            core.decide(job["id"], task["id"], "invalid-choice")
         core.decide(job["id"], task["id"], "reject")
         self.assertEqual(core.paper(), self.before)
         self.assertEqual(core.get("job", job["id"])["tasks"][0]["status"], "rejected")

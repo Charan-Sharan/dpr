@@ -88,21 +88,54 @@ class ScholarshipTests(unittest.TestCase):
         s.decide(job["id"], task["id"], "approve")
         self.assertEqual(core.paper()["id"], approved["id"])
 
-    def test_override_requires_rationale_and_retains_concern(self):
+    def test_allow_all_saves_proposals_and_their_dependencies(self):
+        self.dependencies = True
+        job = s.create('Revise both sections', 'revise', allow_all=True)
+        s.execute(job['id'])
+        result = s.get(job['id'])
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual([t['status'] for t in result['tasks']], ['committed', 'committed'])
+        self.assertNotEqual(core.paper()['id'], self.version['id'])
+
+    def test_source_free_claims_need_only_normal_approval(self):
         self.unsupported = True
         job = self.run_session("revise")
         task = job["tasks"][0]
-        self.assertEqual(task["status"], "evidence_required")
-        with self.assertRaises(ValueError):
-            s.decide(job["id"], task["id"], "allow")
-        with self.assertRaises(ValueError):
-            s.decide(job["id"], task["id"], "approve")
-        s.decide(job["id"], task["id"], "allow", "Retain as an explicitly unverified draft")
+        self.assertEqual(task["status"], "awaiting_approval")
+        self.assertNotIn("audit", task)
+        self.assertEqual(core.paper()["id"], self.version["id"])
+        s.decide(job["id"], task["id"], "allow")
         self.assertEqual(s.get(job["id"])["status"], "completed")
-        self.assertIn("1 document change(s) saved", s.get(job["id"])["summary"])
-        self.assertTrue(core.paper()["sections"][0]["blocks"][0]["evidence_override"])
-        self.assertTrue(any(m["kind"] == "open_question" for m in core.all_items("memory")))
-        self.assertIn("unverified draft", str(s.audit_export()))
+        self.assertNotIn("evidence_override", core.paper()["sections"][0]["blocks"][0])
+
+    def test_old_evidence_hold_becomes_normal_approval_without_read_side_effects(self):
+        job = self.run_session("revise")
+        job["tasks"][0].update(status="evidence_required", reason="Missing source")
+        core.put("job", job)
+        presented = s.snapshot()["sessions"][0]
+        self.assertEqual(presented["tasks"][0]["status"], "awaiting_approval")
+        self.assertEqual(core.get("job", job["id"])["tasks"][0]["status"], "evidence_required")
+        self.assertEqual(core.paper()["id"], self.version["id"])
+        s.decide(job["id"], job["tasks"][0]["id"], "approve")
+        self.assertEqual(core.get("job", job["id"])["tasks"][0]["status"], "committed")
+
+    def test_optional_source_review_warnings_failures_and_invalid_responses_do_not_block_approval(self):
+        core.put("evidence", {"id": "source", "title": "Notes", "text": "Optional notes."})
+        for assessment in ({"unsupported_claims": ["Missing support"], "objections": ["Source concern"], "rationale": "Check the interpretation"}, {"invalid": True}, RuntimeError("Reviewer unavailable")):
+            with self.subTest(assessment=assessment):
+                def model(provider, role, system, payload, **kwargs):
+                    if "unsupported_claims:[string]" in system:
+                        if isinstance(assessment, Exception):
+                            raise assessment
+                        return assessment
+                    return self.model(provider, role, system, payload, **kwargs)
+                with patch.object(providers, "complete", side_effect=model):
+                    job = self.run_session("revise")
+                task = job["tasks"][0]
+                self.assertEqual(task["status"], "awaiting_approval")
+                self.assertTrue(task["audit"]["advisory"])
+                s.decide(job["id"], task["id"], "approve")
+                self.assertEqual(s.get(job["id"])["status"], "completed")
 
     def test_stale_approval_and_cross_project_lookup_are_blocked(self):
         job = self.run_session("revise")
@@ -114,6 +147,19 @@ class ScholarshipTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 s.get(job["id"])
             self.assertEqual(s.snapshot()["memory"], [])
+
+    def test_optional_source_review_is_skipped_near_the_call_limit(self):
+        core.put("evidence", {"id": "source", "title": "Notes", "text": "Optional context."})
+        job = s.create("Revise introduction", "revise")
+        job["calls"] = 35
+        core.put("job", job)
+        s.execute(job["id"])
+        result = s.get(job["id"])
+        self.assertEqual(result["tasks"][0]["status"], "awaiting_approval")
+        self.assertEqual(result["calls"], 39)
+        self.assertNotIn("audit", result["tasks"][0])
+        s.decide(job["id"], result["tasks"][0]["id"], "approve")
+        self.assertEqual(s.get(job["id"])["status"], "completed")
 
     def test_late_result_after_stop_is_discarded(self):
         job = s.create("Question", "discuss")
@@ -186,12 +232,12 @@ class ScholarshipTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertEqual(core.paper()["sections"][0]["heading"], "Methods")
 
-    def test_invalid_proposal_cannot_be_allowed(self):
+    def test_invalid_proposal_cannot_be_approved(self):
         job = self.run_session("revise")
         job["tasks"][0].update(status="evidence_required", proposal={"section_id": "wrong", "operation": "replace_section", "text": "Wrong target"})
         core.put("job", job)
         with self.assertRaises(ValueError):
-            s.decide(job["id"], job["tasks"][0]["id"], "allow", "Override")
+            s.decide(job["id"], job["tasks"][0]["id"], "approve")
         self.assertEqual(core.paper()["id"], self.version["id"])
 
     def test_panel_changes_only_while_paused(self):

@@ -107,7 +107,7 @@ def get(session_id):
     job = core.get("job", session_id)
     if not job or job.get("schema") != SCHEMA:
         raise ValueError("Unknown session in this project")
-    return job
+    return core.present_job(job)
 
 
 def record(job, kind, message, **data):
@@ -117,7 +117,7 @@ def record(job, kind, message, **data):
     return entry
 
 
-def create(prompt, mode="auto", selection=None, source_ids=None):
+def create(prompt, mode="auto", selection=None, source_ids=None, allow_all=False):
     if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 12000 or mode not in MODES:
         raise ValueError("Provide a prompt up to 12,000 characters and a valid mode")
     with core.LOCK:
@@ -127,7 +127,7 @@ def create(prompt, mode="auto", selection=None, source_ids=None):
             core.validate_selection(selection, core.paper())
         ids = core.validate_source_ids(source_ids or [], core.source_context())
         job = dict(id=core.uid(), schema=SCHEMA, project_id=core.PROJECT.get(), prompt=prompt.strip(),
-                   objective=prompt.strip(), mode=mode, selection=selection, source_ids=ids,
+                   objective=prompt.strip(), mode=mode, selection=selection, source_ids=ids, allow_all=allow_all is True,
                    at=time.time(), status="queued", revision=0, tasks=[], turns=[], activity=[], sequence=0,
                    panel=default_panel(), memory_ids=[], queue=[], round=1, calls=0, contributions=0,
                    counts={}, last_spoke={}, initial=[], summary="Queued", document_version=core.paper()["id"])
@@ -282,7 +282,7 @@ def revision_outcome(job):
     """Derive editing status from tasks, not from whether a discussion has turns left."""
     tasks = job.get("tasks", [])
     committed = sum(t["status"] == "committed" and t.get("changed", True) for t in tasks)
-    pending = [t for t in tasks if t["status"] in ("awaiting_approval", "evidence_required", "disputed")]
+    pending = [t for t in tasks if t["status"] in ("awaiting_approval", "disputed")]
     attention = [t for t in tasks if t["status"] in ("needs_input", "waiting", "blocked", "created")]
     outcome = f"{committed} document change(s) saved." if committed else "No document changes saved."
     if pending:
@@ -301,6 +301,7 @@ def present_session(job):
     Do not mutate stored history or run models during a read. Only infer completion
     when every editing task is terminal; explicit pause/stop/checkpoints are preserved.
     """
+    job = core.present_job(job)
     if (job.get("mode") == "revise" and job["status"] in ("awaiting_input", "awaiting_approval", "completed")
             and job.get("tasks") and not job.get("checkpoint")
             and all(t["status"] in ("committed", "rejected", "superseded") for t in job["tasks"])):
@@ -380,7 +381,7 @@ def control(session_id, action, text="", panel=None, reply_to=None):
                 raise ValueError("Wait for a review checkpoint first")
             if job.get("review_version", job["document_version"]) != core.paper()["id"]:
                 raise ValueError("Document changed; review the current version before marking it reviewed")
-            if any(t["status"] in ("awaiting_approval", "disputed", "evidence_required", "waiting") for t in job["tasks"]):
+            if any(t["status"] in ("awaiting_approval", "disputed", "waiting") for t in job["tasks"]):
                 raise ValueError("Resolve pending document proposals first")
             job.update(status="completed", reviewed_version=core.paper()["id"], revision=job["revision"] + 1)
             add_memory(job, "decision", "Researcher marked this inquiry reviewed; not a correctness certification.", authority="researcher_decision")
@@ -484,7 +485,7 @@ def discussion(job):
                     add_memory(job, "claim", claim["text"], turn["id"])
                     item = core.get("memory", job["memory_ids"][-1])
                     probe = {"section_id": "probe", "operation": "append", "text": claim["text"], "claims": [claim]}
-                    issue = core.validate_proposal(probe, {"id": "probe", "blocks": []}, core.source_context())
+                    issue = core.citation_issue(probe, core.source_context())
                     citations = claim.get("citations", [])
                     item.update(citations=[c for c in citations if isinstance(c, dict)] if isinstance(citations, list) else [], evidence_status="quote_matched_not_semantically_verified" if not issue else "unsupported",
                                 evidence_issue=issue)
@@ -558,7 +559,7 @@ def revision_tasks(job):
         proposal = model_call(job, "writer",
             "Return {section_id,operation:'append'|'replace_block'|'replace_section',block_id:null|string,text,claims:[{text,citations:[{source_id,quote}]}]}. "
             "Use the supplied section ID. For a selection, replace its block and preserve text outside the selection exactly. "
-            "List factual scientific claims, cite exact source quotations; editorial prose needs no citations. "
+            "Sources and citations are optional. If using a source quotation, reproduce it accurately. "
             "If essential data is missing return {needs_input:string}, not placeholder prose.",
             dict(context(job), instruction=task["instruction"], section=section, selection=job["selection"],
                  feedback=task.get("feedback")), participant=next((p for p in job["panel"] if p["role"] == "writer"), None))
@@ -572,11 +573,11 @@ def revision_tasks(job):
             continue
         task["proposal"] = proposal
         task["before"] = "\n\n".join(b["text"] for b in section["blocks"])
-        issue = core.validate_proposal(proposal, section, core.source_context())
+        issue = core.validate_proposal(proposal, section)
         if not issue and job["selection"]:
             issue = core.validate_selection_proposal(proposal, job["selection"], section)
         if issue:
-            task.update(status="evidence_required" if "Evidence" in issue or "Citation" in issue else "blocked", reason=issue)
+            task.update(status="blocked", reason=issue)
             save(job)
             continue
         preview = core.apply_proposal(dict(current, sections=[section]), proposal, job["prompt"])
@@ -588,22 +589,38 @@ def revision_tasks(job):
         review_context = dict(context(job), section=section, proposal=proposal, instruction=task["instruction"])
         for participant in reviewers:
             # Reviewers see the proposal, not each other's assessments.
-            assessment = model_call(job, participant["role"], "Return {objections:[string],rationale:string}. Independently review accuracy, alternatives, and whether the proposed edit follows the instruction. Apply your supplied perspective.",
+            assessment = model_call(job, participant["role"], "Return {objections:[string],rationale:string}. Independently review accuracy, alternatives, and whether the proposed edit follows the instruction. Sources and citations are optional; do not object solely because supporting sources are absent. Apply your supplied perspective.",
                                     dict(review_context, perspective=participant["perspective"]), participant)
             reviews.append(dict(participant=participant["id"], perspective=participant["perspective"], **assessment))
         valid_reviews = all(isinstance(r.get("objections"), list) and isinstance(r.get("rationale"), str) for r in reviews)
         review = {"objections": [objection for r in reviews for objection in r.get("objections", [])] if valid_reviews else None,
                   "rationale": "\n".join(r["perspective"] + ": " + str(r.get("rationale", "")) for r in reviews)}
-        audit = model_call(job, "evidence", "Return {unsupported_claims:[string],objections:[string],rationale:string}. Audit every empirical assertion, including omitted claims. Quote existence alone does not prove semantic support.",
-                           dict(context(job), proposal=proposal))
-        task = next(t for t in job["tasks"] if t["id"] == task["id"])
-        if not all(isinstance(x, list) for x in (review.get("objections"), audit.get("unsupported_claims"), audit.get("objections"))):
-            task.update(status="blocked", reason="Invalid review response; request fresh review")
+        # Keep optional diagnostics from exhausting the four-attempt fallback/retry budget.
+        if core.source_context() and job["calls"] <= 36:
+            try:
+                audit = model_call(job, "evidence", "Return {unsupported_claims:[string],objections:[string],rationale:string}. Review optional source support. This assessment is informational and does not decide whether text may be saved.",
+                                   dict(context(job), proposal=proposal))
+                if not isinstance(audit, dict) or not all(isinstance(audit.get(key), list) for key in ("unsupported_claims", "objections")):
+                    audit = {"rationale": "Optional source review unavailable: invalid assessment."}
+            except Halt:
+                raise
+            except Exception as exc:
+                audit = {"rationale": "Optional source review unavailable: " + str(exc)}
+            task = next(t for t in job["tasks"] if t["id"] == task["id"])
+            task["audit"] = dict(audit, advisory=True)
         else:
-            objections = review["objections"] + audit["objections"]
-            unsupported = audit["unsupported_claims"]
-            task.update(status="evidence_required" if unsupported else "disputed" if objections else "awaiting_approval",
-                        reason="; ".join(map(str, unsupported or objections)), review=review, reviews=reviews, audit=audit)
+            task.pop("audit", None)
+        if not isinstance(review.get("objections"), list):
+            task.update(status="blocked", reason="Invalid review response; request fresh review", review=review, reviews=reviews)
+        else:
+            objections = review["objections"]
+            task.update(status="disputed" if objections else "awaiting_approval",
+                        reason="; ".join(map(str, objections)), review=review, reviews=reviews)
+            if job.get("allow_all"):
+                with core.LOCK:
+                    guard(job["id"], job["revision"])
+                    if core.commit(task, job):
+                        record(job, "decision", "Allowed automatically by Allow all", task_id=task["id"])
         save(job)
     job = get(job["id"])
     revision_outcome(job)
@@ -664,6 +681,8 @@ def review_document(job):
 
 
 def decide(session_id, task_id, choice, rationale=""):
+    if choice == "allow":
+        choice = "approve"
     with core.LOCK:
         job = get(session_id)
         if job["status"] in ("queued", "running"):
@@ -676,7 +695,7 @@ def decide(session_id, task_id, choice, rationale=""):
                 revision_outcome(job)
                 core.put("job", job)
             return job
-        if task["status"] not in ("awaiting_approval", "evidence_required", "disputed", "blocked", "needs_input"):
+        if task["status"] not in ("awaiting_approval", "disputed", "blocked", "needs_input"):
             raise ValueError("Proposal is not awaiting a decision")
         if choice == "reject":
             task["status"] = "rejected"
@@ -685,23 +704,19 @@ def decide(session_id, task_id, choice, rationale=""):
                 raise ValueError("Explain the requested revision")
             task.setdefault("attempts", []).append(copy.deepcopy({k: v for k, v in task.items() if k != "attempts"}))
             task.update(status="created", feedback=rationale)
-        elif choice in ("approve", "allow"):
+        elif choice == "approve":
             if task.get("reviewed_version") != core.paper()["id"]:
                 raise ValueError("Document changed; request a fresh revision before approval")
-            if choice == "allow" and (task["status"] != "evidence_required" or not isinstance(rationale, str) or not rationale.strip()):
-                raise ValueError("An evidence override requires an evidence-required proposal and your rationale")
             if choice == "approve" and task["status"] not in ("awaiting_approval", "disputed"):
-                raise ValueError("Resolve the evidence or validation issue before approving")
+                raise ValueError("Resolve the validation issue before approving")
             if not task.get("proposal"):
                 raise ValueError("There is no proposed text to approve")
             task["researcher_rationale"] = rationale[:2000]
-            if not core.commit(task, job, allow_unverified=choice == "allow"):
+            if not core.commit(task, job):
                 raise ValueError(task["reason"])
             add_memory(job, "decision", f"Researcher {choice}: {task['instruction']}. {rationale}", authority="researcher_decision")
-            if choice == "allow":
-                add_memory(job, "open_question", "Evidence remains unverified: " + task.get("reason", ""), section_ids=[task["section_id"]])
         else:
-            raise ValueError("Choose approve, allow, reject or revise")
+            raise ValueError("Choose approve, reject or revise")
         record(job, "decision", choice, task_id=task_id, rationale=rationale[:2000])
         runnable = any(t["status"] in ("created", "waiting") and all(job["tasks"][d]["status"] == "committed" for d in t["depends_on"]) for t in job["tasks"])
         if runnable and job["calls"] < 40 and not any(j["id"] != job["id"] and j["status"] in ("running", "queued") for j in core.all_items("job")):

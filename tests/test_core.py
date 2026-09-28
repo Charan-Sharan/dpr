@@ -18,14 +18,53 @@ class RevisionTests(unittest.TestCase):
         core.DB = self.original_db
         self.tmp.cleanup()
 
-    def test_unverified_citation_blocks_claim(self):
+    def test_manual_allow_and_dependent_proposals(self):
+        ids = [s['id'] for s in self.version['sections']]
+        job = dict(id='manual', prompt='Edit two sections', status='queued', tasks=[], allow_all=False)
+        core.put('job', job)
+        def model(role, system, payload):
+            if role == 'planner':
+                return {'tasks': [dict(section_id=ids[i], operation='revise_section', instruction='Edit', depends_on=deps)
+                                  for i, deps in ((1, []), (2, [0]))]}
+            if role == 'writer':
+                return dict(section_id=payload['section']['id'], operation='append', text='Proposed prose.', claims=[])
+            return {'objections': []}
+        with patch.object(core, 'llm', side_effect=model):
+            core.run_job(job['id'])
+            pending = core.get('job', job['id'])
+            self.assertEqual(core.paper()['id'], self.version['id'])
+            self.assertEqual([t['status'] for t in pending['tasks']], ['awaiting_approval', 'waiting'])
+            allowed = core.decide(job['id'], pending['tasks'][0]['id'], 'allow')
+            self.assertEqual(allowed['status'], 'queued')
+            core.run_job(job['id'])
+            pending = core.get('job', job['id'])
+            self.assertEqual([t['status'] for t in pending['tasks']], ['committed', 'awaiting_approval'])
+            core.decide(job['id'], pending['tasks'][1]['id'], 'allow')
+            self.assertEqual(core.get('job', job['id'])['status'], 'complete')
+
+    def test_allow_all_saves_reviewed_proposals_including_disagreements(self):
+        section = self.version['sections'][1]
+        core.put('job', dict(id='automatic', prompt='Edit', status='queued', tasks=[], allow_all=True))
+        def model(role, system, payload):
+            if role == 'planner':
+                return {'tasks': [dict(section_id=section['id'], operation='revise_section', instruction='Edit')]}
+            if role == 'writer':
+                return dict(section_id=section['id'], operation='append', text='Proposed prose.', claims=[])
+            return {'objections': ['Alternative interpretation']}
+        with patch.object(core, 'llm', side_effect=model):
+            core.run_job('automatic')
+        self.assertEqual(core.get('job', 'automatic')['tasks'][0]['status'], 'committed')
+
+    def test_missing_or_unmatched_citations_are_advisory(self):
         section = self.version["sections"][1]
         source = {"id": "src", "text": "The observed runtime was 42 seconds in this benchmark."}
         proposal = {"section_id": section["id"], "operation": "append", "text": "The algorithm is faster.",
                     "claims": [{"text": "Faster", "citations": [{"source_id": "src", "quote": "invented passage about speed"}]}]}
-        self.assertIn("not found", core.validate_proposal(proposal, section, [source]))
+        self.assertIsNone(core.validate_proposal(proposal, section))
+        self.assertIn("not found", core.citation_issue(proposal, [source]))
         proposal["claims"][0]["citations"] = []
-        self.assertIn("Evidence required", core.validate_proposal(proposal, section, [source]))
+        self.assertIsNone(core.validate_proposal(proposal, section))
+        self.assertIn("No source citation", core.citation_issue(proposal, [source]))
 
     def test_partial_commit_dispute_and_undo(self):
         ids = [s["id"] for s in self.version["sections"]]

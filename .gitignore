@@ -7,3 +7,5 @@ venv/
 .agents/
 .codex/
 *.sqlite3.backup-*
+node_modules/
+.npm-cache/

@@ -18,12 +18,17 @@ ROOT = Path(__file__).parent
 class Handler(BaseHTTPRequestHandler):
     def send(self, value, status=200, content_type="application/json"):
         data = json.dumps(value).encode() if content_type == "application/json" else value
-        self.send_response(status)
-        self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # React cancels polling when switching projects or leaving the page.
+            # The disconnected client cannot receive another error response.
+            return
 
     def body(self):
         length = int(self.headers.get("Content-Length", "0"))
@@ -49,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
                                   "scholarship": scholarship.snapshot(),
                                   "providers": core.providers.status(),
                                   "paper": core.paper(), "sources": [{"id": e["id"], "title": e["title"]} for e in core.all_items("evidence")],
-                                  "jobs": core.all_items("job"), "events": core.all_items("event"),
+                                  "jobs": [core.present_job(job) for job in core.all_items("job")], "events": core.all_items("event"),
                                   "versions": [{"id": v["id"], "number": v["number"], "prompt": v["prompt"], "at": v["at"]} for v in core.all_items("version")]})
             if path == "/api/sessions":
                 return self.send(scholarship.snapshot())
@@ -114,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sessions" or (path == "/api/run" and scholarship.enabled()):
                 if not scholarship.enabled():
                     raise ValueError("Enable DPR scholarship for this project first")
-                job = scholarship.create(data.get("prompt"), data.get("mode", "auto"), data.get("selection"), data.get("source_ids"))
+                job = scholarship.create(data.get("prompt"), data.get("mode", "auto"), data.get("selection"), data.get("source_ids"), data.get("allow_all", False))
                 scholarship.launch(job["id"])
                 return self.send(job, 202)
             if path == "/api/run":
@@ -131,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
                         core.validate_selection(selection, core.paper())
                     source_ids = core.validate_source_ids(data.get("source_ids", []), core.source_context())
                     job = {"id": core.uid(), "prompt": prompt, "selection": selection,
-                           "source_ids": source_ids,
+                           "source_ids": source_ids, "allow_all": data.get("allow_all") is True,
                            "project_id": core.PROJECT.get(), "status": "queued", "tasks": [], "at": core.time.time()}
                     core.put("job", job)
                 threading.Thread(target=core.run_job, args=(job["id"], job["project_id"]), daemon=True).start()
@@ -168,7 +173,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(job)
                 if scholarship.enabled():
                     raise ValueError("Legacy proposal: request a fresh revision under the new workflow")
-                return self.send(core.decide(data["job_id"], data["task_id"], data["choice"]))
+                job = core.decide(data["job_id"], data["task_id"], data["choice"])
+                if job["status"] == "queued":
+                    threading.Thread(target=core.run_job, args=(job["id"], job["project_id"]), daemon=True).start()
+                return self.send(job)
             if path == "/api/undo":
                 return self.send(core.undo())
             if path == "/api/markdown":

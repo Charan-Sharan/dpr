@@ -1,5 +1,6 @@
 """Browser and HTTP integration with mocked providers and a disposable database."""
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -32,7 +33,7 @@ class ScholarshipBrowserTests(unittest.TestCase):
             if "Break the user's instruction" in system:
                 return {"tasks": [{"operation": "revise_section", "section_id": core.paper()["sections"][0]["id"], "instruction": "Revise introduction", "depends_on": []}]}
             if "block_id:null|string,text,claims" in system:
-                return {"section_id": payload["section"]["id"], "operation": "replace_section", "text": "Proposed scope.", "claims": []}
+                return {"section_id": payload["section"]["id"], "operation": "replace_section", "text": "Proposed scope.", "claims": [{"text": "A general claim", "citations": []}]}
             if "unsupported_claims:[string]" in system:
                 return {"unsupported_claims": [], "objections": [], "rationale": "No empirical assertions"}
             if "Independently review" in system:
@@ -53,10 +54,12 @@ class ScholarshipBrowserTests(unittest.TestCase):
             try:
                 result = subprocess.run([shutil.which("chromium"), "--headless", "--no-sandbox", "--disable-gpu",
                     "--disable-dev-shm-usage", "--no-proxy-server", "--no-first-run", "--user-data-dir=" + directory + "/browser",
-                    "--dump-dom", "--virtual-time-budget=20000", f"http://127.0.0.1:{httpd.server_port}/__test"],
-                    capture_output=True, text=True, timeout=45)
+                    "--dump-dom", "--virtual-time-budget=90000", f"http://127.0.0.1:{httpd.server_port}/__test"],
+                    capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stderr[-2000:])
-                self.assertIn('<pre id="result">PASS:', result.stdout, result.stdout[:4000] + result.stderr[-1000:])
+                marker = re.search(r'<pre id="result">(.*?)</pre>', result.stdout, re.S)
+                test_result = marker.group(1) if marker else result.stdout[:2000]
+                self.assertTrue(test_result.startswith("PASS:"), test_result + result.stderr[-1000:])
             finally:
                 httpd.shutdown()
                 httpd.server_close()

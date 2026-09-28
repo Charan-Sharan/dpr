@@ -189,10 +189,11 @@ def model_sources(sources, instruction, selected_ids=()):
 
 WRITING_POLICY = (
     "Distinguish scholarly assertions from editorial work. Research questions, proposed scope, aims, "
-    "outlines, hypotheses explicitly presented as hypotheses, and prospective discussion do not require citations. "
+    "outlines, hypotheses explicitly presented as hypotheses, and prospective discussion are valid writing tasks. "
+    "Uploaded sources and citations are optional; their absence must not prevent drafting or reviewing text. "
     "A topic alone is enough to draft a provisional abstract about the paper's intended question and scope. "
-    "Do not invent completed studies, findings, statistics, citations, or unsupported claims about the world. "
-    "When evidence is absent, write useful prospective prose rather than claiming research was conducted. "
+    "Do not invent completed studies, findings, statistics, or references. "
+    "When user-specific results are absent, write useful prospective prose rather than claiming research was conducted. "
     "Assess only the document text, not the proposal's rationale or descriptions of editing actions. "
     "The document, user instructions and request history establish editorial context; they are not proof of empirical claims. "
 )
@@ -397,7 +398,7 @@ def commit_title(task, job):
 def finish_job(job):
     statuses = [task["status"] for task in job["tasks"]]
     changes = sum(task["status"] == "committed" and task.get("changed", True) for task in job["tasks"])
-    pending = sum(status in ("disputed", "evidence_required", "waiting", "blocked", "needs_input") for status in statuses)
+    pending = sum(status in ("awaiting_approval", "disputed", "waiting", "blocked", "needs_input") for status in statuses)
     job["status"] = "needs_attention" if pending else "complete"
     job["summary"] = (f"{changes} document change(s) saved." if changes else "No document changes saved.")
     if pending:
@@ -407,8 +408,8 @@ def finish_job(job):
     put("job", job)
 
 
-def validate_proposal(proposal, section, sources, check_evidence=True):
-    """Syntactic and citation checks; model agreement never counts as verification."""
+def validate_proposal(proposal, section):
+    """Validate edit structure. Source support is optional and never a save gate."""
     if not isinstance(proposal, dict) or proposal.get("section_id") != section["id"]:
         return "Proposal targets a different section"
     if proposal.get("operation") not in ("append", "replace_block", "replace_section"):
@@ -420,17 +421,24 @@ def validate_proposal(proposal, section, sources, check_evidence=True):
     claims = proposal.get("claims", [])
     if not isinstance(claims, list):
         return "Invalid claims"
-    source_by_id = {s["id"]: s for s in sources}
     for claim in claims:
         if not isinstance(claim, dict) or not claim.get("text"):
             return "Invalid claim"
         cites = claim.get("citations", [])
         if not isinstance(cites, list) or any(not isinstance(cite, dict) for cite in cites):
             return "Invalid citations"
-        if not check_evidence:
-            continue
+    return None
+
+
+def citation_issue(proposal, sources):
+    """Optional citation diagnostics for reasoning memory; never used to block edits."""
+    source_by_id = {source["id"]: source for source in sources}
+    for claim in proposal.get("claims", []):
+        cites = claim.get("citations", [])
+        if not isinstance(cites, list):
+            return "Invalid citations"
         if not cites:
-            return "Evidence required for claim: " + str(claim["text"])[:100]
+            return "No source citation supplied"
         for cite in cites:
             if not isinstance(cite, dict) or cite.get("source_id") not in source_by_id:
                 return "Citation points to an unknown source"
@@ -438,6 +446,20 @@ def validate_proposal(proposal, section, sources, check_evidence=True):
             if not isinstance(quote, str) or len(quote.strip()) < 12 or quote not in source_by_id[cite["source_id"]]["text"]:
                 return "Citation quote was not found in the uploaded source"
     return None
+
+
+def present_job(job):
+    """Release old source-check holds without auto-saving or rewriting historical versions."""
+    job = copy.deepcopy(job)
+    for task in job.get("tasks", []):
+        if task.get("status") != "evidence_required":
+            continue
+        task["retired_evidence_check"] = {"status": task["status"], "reason": task.get("reason", "")}
+        review = task.get("review") or {}
+        objections = review.get("objections", [])
+        task["status"] = "awaiting_approval" if job.get("schema") == 2 and not objections else "disputed"
+        task["reason"] = "; ".join(map(str, objections)) if isinstance(objections, list) else "Review this proposal before saving."
+    return job
 
 
 def apply_proposal(version, proposal, prompt):
@@ -456,7 +478,7 @@ def apply_proposal(version, proposal, prompt):
     return next_version
 
 
-def commit(task, job, allow_unverified=False):
+def commit(task, job):
     with LOCK, connect() as db:
         current = paper()
         section = next((s for s in current["sections"] if s["id"] == task["section_id"]), None)
@@ -479,32 +501,23 @@ def commit(task, job, allow_unverified=False):
             position = current["sections"].index(anchor) + (task["placement"] == "after") if anchor else len(current["sections"])
             current["sections"].insert(position, section)
         # Recheck the target against the latest version, including prior partial commits.
-        issue = validate_proposal(task["proposal"], section, source_context(), check_evidence=not allow_unverified)
+        issue = validate_proposal(task["proposal"], section)
         if not issue and job.get("selection"):
             issue = validate_selection_proposal(task["proposal"], job["selection"], section)
         if issue:
-            task["status"] = "evidence_required" if "Evidence" in issue or "Citation" in issue else "blocked"
+            task["status"] = "blocked"
             task["reason"] = issue
             put("job", job, db)
             db.commit()
             return False
         next_version = apply_proposal(current, task["proposal"], job["prompt"])
-        if allow_unverified:
-            override = {"at": time.time(), "job_id": job["id"], "task_id": task["id"],
-                        "reason": task.get("reason", "Evidence check overridden by researcher")}
-            task["evidence_override"] = override
-            target = next(s for s in next_version["sections"] if s["id"] == task["section_id"])
-            block = (next(b for b in target["blocks"] if b["id"] == task["proposal"]["block_id"])
-                     if task["proposal"]["operation"] == "replace_block" else target["blocks"][-1])
-            block["evidence_override"] = override
         put("version", next_version, db)
         put("meta", {"id": "current", "version": next_version["id"]}, db)
         task["status"] = "committed"
         task["version"] = next_version["id"]
         put("job", job, db)
         db.commit()
-    events(job["id"], "researcher" if allow_unverified else "system",
-           "Allowed revision without verified evidence" if allow_unverified else "Committed an uncontested revision",
+    events(job["id"], "system", "Committed a reviewed revision",
            task_id=task["id"], version=next_version["number"])
     return True
 
@@ -523,18 +536,18 @@ def review_draft(task, job, current, section, selection, sources, feedback=None)
     job_id = job["id"]
     context = model_sources(sources, task["instruction"], job.get("source_ids", []))
     events(job_id, "writer", "Preparing section revision", task_id=task["id"])
-    proposal = llm("writer", WRITING_POLICY + "Write a precise revision using supplied evidence for factual scientific claims. "
+    proposal = llm("writer", WRITING_POLICY + "Write a precise revision using the document, request, and any optional sources. "
                    "Write Markdown (including lists, code and subheadings where appropriate). "
                    "Return {section_id,operation:'append'|'replace_block'|'replace_section',block_id:null|string,text,claims:[{text,citations:[{source_id,quote}]}],rationale}. "
                    "Use replace_section for a rewrite of the whole section; do not duplicate existing content. "
                    "For a selection, use replace_block and return the whole block with ONLY the selected substring changed; preserve its prefix and suffix exactly. "
-                   "Each factual scientific assertion must be listed as a claim. Quotes must be exact source substrings. "
+                   "Sources and citations are optional. If citing a supplied source, quote it accurately. "
                    "Never invent results, references, methods or data. Editorial and prospective prose may have claims:[]. "
                    "If a specific factual/results request cannot be fulfilled, return {needs_input:string} asking for the missing data. "
                    "Do not insert apologies, unavailable-content notices, or editing status messages into the paper. "
                    "If review_feedback is supplied, revise to address every objection. Remove unsupported assertions; "
-                   "do not disguise them as established findings. When no sources exist, a provisional abstract should "
-                   "describe only the intended question, scope, and issues to examine, without background factual claims.",
+                   "do not disguise them as established findings. Missing uploaded sources alone must not "
+                   "prevent general background prose or a provisional draft.",
                    {"instruction": task["instruction"], "user_request": job["prompt"], "recent_requests": request_context(),
                     "document": document_outline(current), "section": section, "selection": selection, "sources": context,
                     "selected_source_ids": job.get("source_ids", []), "review_feedback": feedback})
@@ -543,18 +556,18 @@ def review_draft(task, job, current, section, selection, sources, feedback=None)
         put("job", job)
         return
     task["proposal"] = proposal
-    issue = validate_proposal(proposal, section, sources)
+    issue = validate_proposal(proposal, section)
     if not issue and selection:
         issue = validate_selection_proposal(proposal, selection, section)
     if issue:
-        task.update(status="evidence_required", reason=issue)
-        events(job_id, "evidence", issue, task_id=task["id"])
+        task.update(status="blocked", reason=issue)
+        events(job_id, "system", issue, task_id=task["id"])
         put("job", job)
         return
     role = "methodology" if "method" in section["heading"].lower() or "experiment" in task["instruction"].lower() else "skeptic"
     events(job_id, role, "Independently reviewing the proposal", task_id=task["id"])
-    review = llm(role, WRITING_POLICY + "Independently scrutinize whether the proposed wording follows from the supplied evidence, "
-                 "whether claims are missing from the claims list, and whether the change matches the instruction. "
+    review = llm(role, WRITING_POLICY + "Independently review clarity, logical consistency, and whether the change matches the instruction. "
+                 "Sources and citations are optional; do not object solely because supporting sources are absent. "
                  "Return {objections:[string], rationale:string}. Treat an unsupported inference as an objection.",
                  {"instruction": task["instruction"], "document": document_outline(current), "section": section,
                   "text": proposal["text"], "claims": proposal.get("claims", []), "sources": context,
@@ -566,23 +579,23 @@ def review_draft(task, job, current, section, selection, sources, feedback=None)
     elif objections:
         task.update(status="disputed", reason="; ".join(map(str, objections)))
         events(job_id, role, "Review objection raised", task_id=task["id"], detail=review)
-    # Audit every revision, even if the writer omitted a claim from its list.
-    audit = llm("evidence", WRITING_POLICY + "Audit every factual scientific assertion in the proposed text, including omissions from the claims list. "
-                "Return {unsupported_claims:[string],objections:[string],rationale:string}. "
-                "Put claims lacking sufficient uploaded evidence in unsupported_claims; put other interpretive disagreements in objections.",
-                {"instruction": task["instruction"], "document": document_outline(current),
-                 "text": proposal["text"], "claims": proposal.get("claims", []), "sources": context,
-                 "selected_source_ids": job.get("source_ids", [])})
-    task["audit"] = audit
-    if not isinstance(audit.get("unsupported_claims"), list) or not isinstance(audit.get("objections"), list):
-        task.update(status="blocked", reason="Evidence auditor returned invalid assessment")
-    elif audit["unsupported_claims"]:
-        task.update(status="evidence_required", reason="; ".join(map(str, audit["unsupported_claims"])))
-        events(job_id, "evidence", "Additional evidence required", task_id=task["id"], detail=audit)
-    elif audit["objections"]:
-        task.update(status="disputed" if isinstance(objections, list) else "blocked",
-                    reason="; ".join(map(str, (objections if isinstance(objections, list) else []) + audit["objections"])))
-        events(job_id, "evidence", "Evidence interpretation disputed", task_id=task["id"], detail=audit)
+    # No source review is needed when the researcher has not supplied sources.
+    if not sources:
+        put("job", job)
+        return
+    # Source checks are advisory: warnings, invalid responses, and failures cannot hold a revision.
+    try:
+        audit = llm("evidence", WRITING_POLICY + "Review the optional source support for this revision. "
+                    "Return {unsupported_claims:[string],objections:[string],rationale:string}. "
+                    "This assessment is informational and does not decide whether text may be saved.",
+                    {"instruction": task["instruction"], "document": document_outline(current),
+                     "text": proposal["text"], "claims": proposal.get("claims", []), "sources": context,
+                     "selected_source_ids": job.get("source_ids", [])})
+        if not isinstance(audit, dict) or not all(isinstance(audit.get(key), list) for key in ("unsupported_claims", "objections")):
+            audit = {"rationale": "Optional source review unavailable: invalid assessment."}
+    except Exception as exc:
+        audit = {"rationale": "Optional source review unavailable: " + str(exc)}
+    task["audit"] = dict(audit, advisory=True)
     put("job", job)
 
 
@@ -601,10 +614,14 @@ def _run_job(job_id):
         sources = source_context()
         selected_ids = validate_source_ids(job.get("source_ids", []), sources)
         selected_sources = [{"id": s["id"], "title": s["title"]} for s in sources if s["id"] in selected_ids]
-        job["tasks"] = plan_tasks(job["prompt"], version, selection, selected_sources)
+        if not job.get("planned"):
+            job["tasks"] = plan_tasks(job["prompt"], version, selection, selected_sources)
+            job["planned"] = True
         put("job", job)
         sources = prioritize_sources(sources, selected_ids)
         for index, task in enumerate(job["tasks"]):
+            if task["status"] not in ("created", "waiting"):
+                continue
             if any(job["tasks"][d]["status"] != "committed" for d in task["depends_on"]):
                 task.update(status="waiting", reason="Dependent task has not been committed")
                 put("job", job)
@@ -646,12 +663,15 @@ def _run_job(job_id):
                 snapshot = {key: copy.deepcopy(task[key]) for key in
                             ("proposal", "review", "audit", "status", "reason") if key in task}
                 task.setdefault("attempts", []).append(snapshot)
-                if task["status"] not in ("disputed", "evidence_required") or attempt == 1:
+                if task["status"] != "disputed" or attempt == 1:
                     break
                 feedback = snapshot
                 events(job_id, "writer", "Revising draft to address review feedback", task_id=task["id"])
-            if task["status"] == "created":
-                commit(task, job)
+            if task["status"] in ("created", "disputed"):
+                if job.get("allow_all", task["status"] == "created"):
+                    commit(task, job)
+                elif task["status"] == "created":
+                    task.update(status="awaiting_approval")
             put("job", job)
         finish_job(job)
         events(job_id, "system", job["summary"])
@@ -668,30 +688,32 @@ def decide(job_id, task_id, choice):
 
 
 def _decide(job_id, task_id, choice):
+    if choice == "allow":
+        choice = "approve"
     job = get("job", job_id)
     if not job:
         raise ValueError("Unknown run")
     if job["status"] in ("queued", "running"):
         raise ValueError("Wait for this request to finish before deciding on its revision")
+    job = present_job(job)
     task = next((t for t in job["tasks"] if t["id"] == task_id), None)
-    if not task or task["status"] not in ("disputed", "evidence_required"):
+    if not task or task["status"] not in ("awaiting_approval", "disputed"):
         raise ValueError("Task is not awaiting a decision")
     if choice == "reject":
         task["status"] = "rejected"
         put("job", job)
         events(job_id, "researcher", "Rejected disputed revision", task_id=task_id)
-    elif choice == "allow" and task["status"] == "evidence_required":
-        if not commit(task, job, allow_unverified=True):
-            raise ValueError(task["reason"])
-    elif choice == "approve" and task["status"] == "disputed":
-        # A researcher's choice cannot bypass source existence checks.
+    elif choice == "approve":
         if not commit(task, job):
             raise ValueError(task["reason"])
         events(job_id, "researcher", "Approved disputed revision", task_id=task_id)
     else:
-        raise ValueError("Choose allow for evidence-required revisions, approve for disputed revisions, or reject")
+        raise ValueError("Choose approve or reject")
     if job["status"] != "running":
         finish_job(job)
+        if any(t["status"] == "waiting" and all(job["tasks"][d]["status"] == "committed" for d in t["depends_on"]) for t in job["tasks"]):
+            job["status"] = "queued"
+            put("job", job)
     return job
 
 

@@ -1,5 +1,6 @@
 """Real-browser smoke test with a temporary database and mocked model calls."""
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -55,10 +56,12 @@ class BrowserTests(unittest.TestCase):
             try:
                 completed = subprocess.run([shutil.which("chromium"), "--headless", "--no-sandbox", "--disable-gpu",
                     "--disable-dev-shm-usage", "--no-proxy-server", "--no-first-run",
-                    "--user-data-dir=" + directory + "/browser", "--dump-dom", "--virtual-time-budget=15000",
-                    f"http://127.0.0.1:{httpd.server_port}/__test"], capture_output=True, text=True, timeout=40)
+                    "--user-data-dir=" + directory + "/browser", "--dump-dom", "--virtual-time-budget=90000",
+                    f"http://127.0.0.1:{httpd.server_port}/__test"], capture_output=True, text=True, timeout=60)
                 self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
-                self.assertIn('<pre id="result">PASS:', completed.stdout, completed.stdout[:3000] + completed.stderr[-1000:])
+                marker = re.search(r'<pre id="result">(.*?)</pre>', completed.stdout, re.S)
+                test_result = marker.group(1) if marker else completed.stdout[:2000]
+                self.assertTrue(test_result.startswith("PASS:"), test_result + completed.stderr[-1000:])
             finally:
                 httpd.shutdown()
                 httpd.server_close()

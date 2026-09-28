@@ -10,7 +10,7 @@ Use **Discuss** for bounded multi-agent inquiry, **Revise** for proposed documen
 
 The right panel has **Discussion**, **Decisions**, **Memory**, and **Activity** tabs. Expand it for longer conversations. Pause to edit/recommend the participant panel. You can reply to a turn, inject context, redirect, stop, or request your own turn. Each inquiry round allows up to six contribution turns, three per participant, and 40 total provider attempts (including retries and fallback). Checkpoints preserve disagreements and ask for your next objective. Replies at the limit are saved without silently starting more model calls; use **Continue round** to authorize another bounded round.
 
-Proposals include before/after text, a line diff, participant reviews, an evidence audit, and source passage inspection. **Allow without verified evidence** requires acknowledgement and a rationale, preserves the concern in memory, and is included in the downloadable reasoning audit. This does not certify a claim. Approval is conservative: any saved-document change requires refreshing pending proposals before approval. Approved prerequisites can resume waiting tasks within the remaining call budget.
+Proposals include before/after text, a line diff, participant reviews, and optional source passage inspection. Sources and citations are optional. When sources are uploaded, the source review is advisory: its warnings or failures do not block saving or approval. Approval is conservative: any saved-document change requires refreshing pending proposals before approval. Approved prerequisites can resume waiting tasks within the remaining call budget.
 
 Reasoning memory records assumptions, alternatives, claims, actions, open questions, and researcher decisions with provenance and correction history. Quotation matches are explicitly not semantic verification. Old memory is marked stale after the document changes. Whole-paper reviews process every section in bounded chunks, checkpoint their coverage, and synthesize findings in batches; partial reviews never appear complete. **Mark reviewed** applies only to the reviewed document version and is not a correctness certification.
 
@@ -20,7 +20,7 @@ The reasoning workflow is an independent adaptation of [Multi-Agent-Reasoning](h
 
 ## Start
 
-Python 3.10+; no Python packages required. PDF extraction additionally needs `pdftotext` (Poppler).
+Python 3.10+; no Python packages required. Frontend development/builds require Node.js 22.12+ and npm. PDF extraction additionally needs `pdftotext` (Poppler).
 
 ```bash
 git clone https://github.com/Charan-Sharan/dpr.git
@@ -31,10 +31,20 @@ cp .env.example .env
 Copy `.env.example` to `.env`, replace the placeholder API keys, then start the server. `GROQ_API_KEY` and `OPEN_ROUTER_API_KEY` are supported; `OPENROUTER_API_KEY` is also accepted. Either provider can be used alone. `your_actual_key_here` is only a placeholder and will be rejected. `.env` is loaded automatically at startup, and existing process environment variables take precedence. Restart the server after configuration changes. Never paste keys into the web page or commit them. `.env`, local databases, and virtual environments are excluded from Git.
 
 ```bash
+npm ci
+npm run build
 python3 server.py
 ```
 
-Open `http://127.0.0.1:8765`. Start with **Edit Markdown** to paste or write a draft, or describe the document you want in the request box. Add text/PDF sources to support scientific claims. Data and versions are stored locally in `workspace.sqlite3`. Set `DPR_DB` for a different database path.
+Open `http://127.0.0.1:8765`. Start with **Edit Markdown** to paste or write a draft, or describe the document you want in the request box. Optionally add text/PDF sources for context. Data and versions are stored locally in `workspace.sqlite3`. Set `DPR_DB` for a different database path.
+
+## Frontend development
+
+The frontend uses React, TypeScript, Vite, Tailwind CSS, and locally owned shadcn/ui components. It keeps the document, evidence, and inquiry panes, with a mobile outline/source toggle. Python continues to serve the same project-scoped APIs and the built files in `static/`; no Node process or CDN is needed at runtime. Rebuild after changing frontend source. The generated `static/` assets are included with the project so it can still run with `python3 server.py` alone.
+
+Run `python3 server.py` in one terminal and `npm run dev` in another. Open the Vite URL (normally `http://127.0.0.1:5173`); `/api` requests proxy to the Python server on port 8765. Run `npm run build` for TypeScript checks and production assets, `npm test` for component tests, and the Python/browser suite below for integrated workflows. Browser tests run against the production build.
+
+UI primitives in `frontend/components/ui/` are adapted from [shadcn/ui](https://github.com/shadcn-ui/ui) under its MIT license (see `frontend/components/ui/LICENSE`). `components.json` configures the shadcn CLI and aliases; add further components with `npx shadcn@latest add <component>`. Workspace state and interaction logic belong in the app, not the reusable UI primitives.
 
 ## Projects
 
@@ -44,9 +54,9 @@ All document endpoints take `?project=<id>` (default: `default`). This scopes ev
 
 ## Providers and troubleshooting
 
-The writer receives a concise document outline and bounded source excerpts to stay within provider token limits. Uploaded sources remain intact locally, and quote validation checks their full text. For evidence-backed edits, name the topic or passage so the relevant excerpt can be selected.
+The writer receives a concise document outline and bounded source excerpts to stay within provider token limits. Uploaded sources remain intact locally. Sources are optional context; their absence does not block a revision. For source-informed edits, name the topic or passage so the relevant excerpt can be selected.
 
-With `DPR_PROVIDER=auto` (the default), planning/writing/evidence prefer Groq; skeptical/methodology review prefers OpenRouter. If the preferred provider fails or is not configured, the other configured provider is used. Transient failures receive one bounded retry. A failed call does not bypass review or evidence validation. Activity logs show the actual provider/model attempts, and errors distinguish authentication, permissions, missing models, billing, rate limits, and invalid JSON. Keys are redacted.
+With `DPR_PROVIDER=auto` (the default), planning/writing/evidence prefer Groq; skeptical/methodology review prefers OpenRouter. If the preferred provider fails or is not configured, the other configured provider is used. Transient failures receive one bounded retry. A failed writer or reviewer call does not bypass normal review. Optional source-review failures are recorded without blocking the revision. Activity logs show the actual provider/model attempts, and errors distinguish authentication, permissions, missing models, billing, rate limits, and invalid JSON. Keys are redacted.
 
 | Role | Groq model | OpenRouter model |
 | --- | --- | --- |
@@ -68,7 +78,7 @@ The central view renders the latest saved document. It updates after a committed
 - Ask “Move Literature Survey after Introduction” to reorder an existing section directly. The move preserves its text, IDs, citations, and history, and creates an undoable version without calling a writing model. Minor heading typos are matched only when the destination is unambiguous. New sections requested “after Introduction” are inserted there rather than appended to the end.
 - Click **Add reference** beside an uploaded source to insert its name at the cursor in the prompt. You can keep typing around it or add several sources. The request also carries the selected source IDs, so files with the same name remain distinct and selected files are prioritized in agent context. Removing the mention before sending removes its selection from that request.
 - “Let's work on a paper titled …” sets the actual document title as a versioned edit, without creating a title section or requiring evidence checks. This changes the paper title, not the project name in the dropdown. Follow-ups can refer to recent requests in the same project.
-- “Fill the abstract” can draft a provisional abstract from the title/topic, expressing scope and intended inquiry without inventing findings. Empirical assertions still require evidence. If actual measurements or other essential information are missing, the app asks for that input alongside the document instead of inserting an unavailable-content message into the paper.
+- “Fill the abstract” can draft a provisional abstract from the title/topic, expressing scope and intended inquiry without inventing findings. Sources and citations are optional; normal review still checks clarity, consistency, and the requested change. If actual measurements or other essential information are missing, the app asks for that input alongside the document instead of inserting an unavailable-content message into the paper.
 - Select a unique passage within one rendered block and ask “Rephrase the selected text”. The request includes the passage and its document version. Edits outside its surrounding boundaries are blocked. Selections crossing Markdown formatting or containing ambiguous repeated text currently require a more specific passage or a request describing the section.
 - Use **Edit Markdown** to write directly. `#` on the first line sets the title; `##` starts a section. Lower headings stay within the section. Saving creates a version. Direct edits are human-authored and do not run agent evidence checks; changed blocks lose their prior evidence annotations.
 - Use **Export Markdown** to download the current draft. LaTeX is deferred from the writing interface; the legacy export endpoint remains for compatibility.
@@ -76,19 +86,19 @@ The central view renders the latest saved document. It updates after a committed
 
 The local Markdown renderer supports headings, simple emphasis, links, fenced code, flat lists, blockquotes, and tables. Raw HTML is rendered as text and unsafe link schemes are disabled. It is a lightweight subset, not a complete CommonMark/GFM implementation: nested lists, images, footnotes, math, and complex nested inline formatting are not supported yet.
 
-Request summaries distinguish saved changes from inquiry-only responses and tasks needing attention. Earlier request errors and findings remain with their requests below newer activity, so an old provider failure is not confused with the latest request. Editing rationales are not treated as scholarly assertions by the evidence auditor.
+Request summaries distinguish saved changes from inquiry-only responses and tasks needing attention. Earlier request errors and findings remain with their requests below newer activity, so an old provider failure is not confused with the latest request. Source review is informational and separate from the decision to save a revision.
 
 Agent activity is grouped by request, with newest requests first and each request's steps shown chronologically from top to bottom. Entries include dates and times. Updating an older request (for example, allowing a revision) keeps it in its original position, with the new event inside that request.
 
-Review objections are sent back to the writer for one revision attempt, followed by fresh review and evidence checks. Both attempts are retained in the task history. Unresolved objections still require human attention; unsupported claims are never automatically approved. To reproduce the title-then-abstract flow using live providers in a temporary database, run `python3 check_providers.py --writing-intent`.
+Normal review objections are sent back to the writer for one revision attempt, followed by fresh review. Both attempts are retained in the task history. Unresolved review objections still require human attention. Source-review warnings do not trigger a retry or a separate approval gate. To reproduce the title-then-abstract flow using live providers in a temporary database, run `python3 check_providers.py --writing-intent`.
 
-**Evidence required** means the proposed text did not pass its supporting-source checks. Once the request finishes, **Allow** saves that proposal by your explicit choice, without requiring verified evidence; **Reject** discards it. Allowed text is labeled “Allowed by you · evidence not verified”, with the original reason and decision retained in the task and document version. This does not turn the claim into a verified claim. Undo remains available. Allow does not bypass stale-edit, operation, or selection-boundary checks.
+The **Allow all** checkbox at the top of the right panel controls new requests and remembers its setting per project. It defaults to unchecked: generated proposals wait for **Allow** or **Reject** (scholarship also offers **Request revision**). When checked, structurally valid proposals save automatically, including proposals with review disagreements. Explicit title changes and section moves still save immediately. Source support is optional and is never an approval requirement. Existing proposals formerly held for source checks are presented for a normal decision and are never automatically saved during an upgrade. Historical records are retained, but documents no longer display the old evidence-override warning. Stale-edit, operation, and selection-boundary checks remain enforced.
 
 ## What works
 
 - Versioned document with stable section/block IDs, Markdown rendering, manual draft editing, and Markdown export.
 - Uploaded text and PDF evidence, with exact quoted passage checks.
-- Groq/OpenRouter-backed planner, writer, skeptical/methodological reviewer, and evidence auditor. The planner picks task scopes; methodology review is selected when relevant.
+- Groq/OpenRouter-backed planner, writer, skeptical/methodological reviewer, and optional source reviewer. The planner picks task scopes; methodology review is selected when relevant.
 - Live event polling with proposals, objections, decisions, and inquiry findings.
 - Independent tasks can commit separately. Disputed edits require a human decision; unsupported claims are blocked. Inquiry-only tasks leave the paper alone.
 - Durable jobs, decisions, evidence, document snapshots, and undo as a new version.
@@ -96,11 +106,11 @@ Review objections are sent back to the writer for one revision attempt, followed
 
 ## DPR principles
 
-The scholar directs the inquiry and owns the conclusions. The shared document is the persistent artifact of that inquiry. Reviewers challenge claims and interpretations; agreement among models is not proof. Uploaded sources support traceable evidence checks. In the opt-in scholarship workflow, generated prose requires explicit approval. In the legacy workflow, uncontested, reviewed changes requested by the human can commit automatically; disputed proposals require a human decision. Changes can be undone. Diverse perspectives can strengthen scrutiny, but models may share errors and role labels do not guarantee independent reasoning.
+The scholar directs the inquiry and owns the conclusions. The shared document is the persistent artifact of that inquiry. Reviewers challenge claims and interpretations; agreement among models is not proof. Uploaded sources support traceable evidence checks. Generated prose waits for explicit Allow in both workflows unless the researcher checks Allow all for new requests. Changes can be undone. Diverse perspectives can strengthen scrutiny, but models may share errors and role labels do not guarantee independent reasoning.
 
 ## Current limits
 
-This is a local prototype, not a production scholarly verification system. Exact quote validation checks passage existence; semantic support relies on the evidence auditor and must still be checked by the researcher. Failures of all configured providers can stop a run midway, leaving already committed independent tasks intact. A paused job can be inspected but not resumed automatically. The parser supports text-based PDFs, not scanned PDFs or tables as structured data. There is no account/authentication, journal template, citation formatter, rich equation editor, or web research. Run on the loopback interface only. Project rename/delete are not implemented.
+This is a local prototype, not a production scholarly verification system. Optional quote diagnostics check passage existence; source review is advisory and does not certify correctness. Failures of all configured providers can stop a run midway, leaving already committed independent tasks intact. A paused job can be inspected but not resumed automatically. The parser supports text-based PDFs, not scanned PDFs or tables as structured data. There is no account/authentication, journal template, citation formatter, rich equation editor, or web research. Run on the loopback interface only. Project rename/delete are not implemented.
 
 ## Tests
 
