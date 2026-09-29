@@ -179,6 +179,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(job)
             if path == "/api/undo":
                 return self.send(core.undo())
+            if path == "/api/restore":
+                return self.send(core.restore_version(data.get("version_id")))
             if path == "/api/markdown":
                 return self.send(core.save_markdown(data.get("markdown"), data.get("base_version")))
             if path == "/api/title":

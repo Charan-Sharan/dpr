@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { FileText, Plus, Undo2, Download, ArrowUpRight } from 'lucide-react'
+import { FileText, Plus, Undo2, Download, ArrowUpRight, RotateCcw } from 'lucide-react'
 import { Button } from './components/ui/button'
 import { Textarea } from './components/ui/input'
 import { Document } from './components/Document'
@@ -499,43 +499,74 @@ export function App() {
               [...state.versions]
                 .sort((a, b) => b.number - a.number)
                 .slice(0, 20)
-                .map((version) => (
-                  <Button
-                    variant="ghost"
-                    className="version-item"
-                    key={version.id}
-                    onClick={async () => {
-                      try {
-                        const item = await api<Snapshot['paper']>(
-                          '/api/version/' + version.id,
-                          project,
-                        )
-                        if (activeProject.current === project)
-                          setModal({
-                            kind: 'detail',
-                            text:
-                              'Version ' +
-                              item.number +
-                              '\n' +
-                              item.title +
-                              '\n\n' +
-                              item.sections
-                                .map(
-                                  (section) =>
-                                    section.heading +
-                                    '\n' +
-                                    section.blocks.map((block) => block.text).join('\n'),
-                                )
-                                .join('\n\n'),
-                          })
-                      } catch (error) {
-                        if (activeProject.current === project) notice(error)
-                      }
-                    }}
-                  >
-                    v{version.number} · {version.prompt}
-                  </Button>
-                ))}
+                .map((version) => {
+                  const current = version.id === state.paper.id
+                  return (
+                    <div className="version-row" key={version.id}>
+                      <Button
+                        variant="ghost"
+                        className="version-item"
+                        onClick={async () => {
+                          try {
+                            const item = await api<Snapshot['paper']>(
+                              '/api/version/' + version.id,
+                              project,
+                            )
+                            if (activeProject.current === project)
+                              setModal({
+                                kind: 'detail',
+                                text:
+                                  'Version ' +
+                                  item.number +
+                                  '\n' +
+                                  item.title +
+                                  '\n\n' +
+                                  item.sections
+                                    .map(
+                                      (section) =>
+                                        section.heading +
+                                        '\n' +
+                                        section.blocks.map((block) => block.text).join('\n'),
+                                    )
+                                    .join('\n\n'),
+                              })
+                          } catch (error) {
+                            if (activeProject.current === project) notice(error)
+                          }
+                        }}
+                      >
+                        v{version.number} · {version.prompt}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="version-restore"
+                        disabled={current || busy}
+                        title={
+                          current
+                            ? 'This is the current version'
+                            : `Restore version ${version.number}`
+                        }
+                        aria-label={
+                          current
+                            ? `Version ${version.number} is current`
+                            : `Restore version ${version.number}`
+                        }
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              `Restore version ${version.number}? This creates a new version and keeps the full history.`,
+                            )
+                          )
+                            void mutate('/api/restore', { version_id: version.id })
+                        }}
+                      >
+                        <RotateCcw />
+                        Restore
+                      </Button>
+                    </div>
+                  )
+                })}
           </div>
         </aside>
       </main>

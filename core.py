@@ -732,6 +732,24 @@ def undo():
     return restored
 
 
+def restore_version(version_id):
+    with LOCK, connect() as db:
+        current = paper()
+        target = get("version", version_id)
+        if not target:
+            raise ValueError("Unknown version")
+        if target["id"] == current["id"]:
+            raise ValueError("That version is already current")
+        # Restoring creates a new version so earlier history remains immutable.
+        restored = copy.deepcopy(target)
+        restored.update(id=uid(), number=current["number"] + 1, parent=current["id"],
+                        at=time.time(), prompt=f"Restored version {target['number']}")
+        put("version", restored, db)
+        put("meta", {"id": "current", "version": restored["id"]}, db)
+        db.commit()
+    return restored
+
+
 def markdown(version):
     parts = ["# " + version["title"]]
     for section in version["sections"]:

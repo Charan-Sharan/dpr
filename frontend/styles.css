@@ -272,6 +272,15 @@ article .cite {
   color: #4c6078;
   cursor: pointer;
 }
+.version-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.version-restore {
+  flex: 0 0 auto;
+}
 #notice {
   font-size: 12px;
   color: #a54d4d;
@@ -824,6 +833,13 @@ input[type='checkbox']:focus-visible {
   white-space: normal;
   text-align: left;
   overflow-wrap: anywhere;
+}
+.version-row .version-item {
+  min-width: 0;
+}
+.version-restore {
+  margin-top: 1px;
+  white-space: nowrap;
 }
 .paper-head > div {
   display: flex;

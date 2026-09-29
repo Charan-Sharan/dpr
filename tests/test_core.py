@@ -93,6 +93,19 @@ class RevisionTests(unittest.TestCase):
         self.assertEqual(core.paper()["sections"][1]["blocks"], [])
         self.assertEqual(core.paper()["number"], self.version["number"] + 2)
 
+    def test_restore_specific_version_creates_new_version(self):
+        original = self.version
+        edited = core.save_markdown("# Revised\n\n## Introduction\n\nNew text", original["id"])
+        restored = core.restore_version(original["id"])
+        self.assertEqual(restored["title"], original["title"])
+        self.assertEqual(restored["sections"], original["sections"])
+        self.assertEqual(restored["number"], edited["number"] + 1)
+        self.assertEqual(restored["parent"], edited["id"])
+        self.assertEqual(restored["prompt"], f"Restored version {original['number']}")
+        self.assertEqual(core.paper()["id"], restored["id"])
+        with self.assertRaisesRegex(ValueError, "already current"):
+            core.restore_version(restored["id"])
+
     def test_markdown_round_trip_and_fenced_headings(self):
         text = "# Notes\n\nOpening **argument**.\n\n## Implementation\n\n1. Start\n2. Finish\n\n```md\n## Not a section\n```\n"
         version = core.save_markdown(text, self.version["id"])
